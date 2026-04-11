@@ -1,9 +1,16 @@
 """Shared async HTTP client helpers."""
 
+import asyncio
+import logging
 from typing import Any
 
 import aiohttp
 from anibridge.utils.limiter import Limiter
+
+LOGGER = logging.getLogger(__name__)
+
+_MAX_RETRIES = 3
+_DEFAULT_RETRY_AFTER = 5
 
 
 class HttpClientError(RuntimeError):
@@ -100,19 +107,35 @@ class HttpClient:
     ) -> aiohttp.ClientResponse:
         """Execute a request and return the raw response."""
         session = await self._ensure_session()
-        if self._limiter is not None:
-            await self._limiter.acquire(asynchronous=True)
-        response = await session.request(
-            method,
-            url,
-            headers=headers,
-            json=json_body,
-            params=params,
-        )
-        if response.status >= 400:
-            text = await response.text()
-            raise HttpClientError(response.status, text)
-        return response
+        for attempt in range(_MAX_RETRIES):
+            if self._limiter is not None:
+                await self._limiter.acquire(asynchronous=True)
+            response = await session.request(
+                method,
+                url,
+                headers=headers,
+                json=json_body,
+                params=params,
+            )
+            if response.status == 429:
+                retry_after = int(
+                    response.headers.get("Retry-After", _DEFAULT_RETRY_AFTER)
+                )
+                LOGGER.warning(
+                    "Rate limited by %s (attempt %d/%d); sleeping %ds",
+                    url,
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    retry_after,
+                )
+                await asyncio.sleep(retry_after)
+                continue
+            if response.status >= 400:
+                text = await response.text()
+                raise HttpClientError(response.status, text)
+            return response
+        text = await response.text()
+        raise HttpClientError(429, text)
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """Return an initialized aiohttp session."""
