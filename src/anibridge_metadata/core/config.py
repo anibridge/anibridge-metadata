@@ -98,6 +98,15 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/anibridge_metadata.db"
     sql_echo: bool = False
     cache_ttl_seconds: int = Field(default=21600, ge=1)
+    stale_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Maximum seconds to wait for an upstream refresh when stale cache "
+            "data is available. If the refresh doesn't finish in time, the "
+            "stale data is returned and the refresh continues in the background."
+        ),
+    )
     request_timeout_seconds: float = Field(default=15.0, gt=0)
     user_agent: str = Field(
         default_factory=lambda: f"anibridge-metadata/{version('anibridge-metadata')}"

@@ -35,4 +35,5 @@ def get_cache_service(
         session=session,
         settings=request.app.state.settings,
         provider_registry=request.app.state.provider_registry,
+        revalidator=getattr(request.app.state, "revalidator", None),
     )

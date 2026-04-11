@@ -1,7 +1,9 @@
 """Cache orchestration for provider metadata lookups."""
 
+import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +25,11 @@ from anibridge_metadata.services.providers.base import (
     UpstreamResponseError,
 )
 
+if TYPE_CHECKING:
+    from anibridge_metadata.services.revalidator import BackgroundRevalidator
+
+LOGGER = logging.getLogger(__name__)
+
 
 class ProviderLookupRegistry(Protocol):
     """Protocol for resolving providers to adapter instances."""
@@ -40,11 +47,13 @@ class CacheService:
         session: AsyncSession,
         settings: Settings,
         provider_registry: ProviderLookupRegistry,
+        revalidator: BackgroundRevalidator | None = None,
     ) -> None:
         """Create a cache service bound to a database session."""
         self._session = session
         self._settings = settings
         self._provider_registry = provider_registry
+        self._revalidator = revalidator
 
     async def get_metadata(
         self,
@@ -75,6 +84,90 @@ class CacheService:
                 cache_ttl_seconds=self._settings.cache_ttl_seconds,
             )
 
+        # Stale-while-revalidate: when we have stale data and a background
+        # revalidator is available, try to refresh within a short timeout.
+        # If the refresh doesn't complete in time, return the stale entry
+        # while the background task keeps running.
+        if record is not None and not force_refresh and self._revalidator is not None:
+            return await self._stale_while_revalidate(
+                descriptor=descriptor,
+                record=record,
+            )
+
+        # No stale data to fall back on (or force_refresh requested) —
+        # perform a blocking upstream fetch in the request session.
+        return await self._blocking_refresh(
+            descriptor=descriptor,
+            record=record,
+        )
+
+    async def _stale_while_revalidate(
+        self,
+        *,
+        descriptor: MetadataDescriptor,
+        record: MetadataRecord,
+    ) -> MetadataEnvelope:
+        """Wait briefly for a background refresh, falling back to stale data."""
+        assert self._revalidator is not None
+        task = self._revalidator.schedule(descriptor)
+        try:
+            # Shield the task so a timeout does not cancel the background work.
+            succeeded = await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=self._settings.stale_timeout_seconds,
+            )
+        except TimeoutError:
+            LOGGER.debug(
+                "Stale-while-revalidate timeout for %s; returning stale data.",
+                descriptor.key,
+            )
+            return record_to_envelope(
+                record,
+                source="stale-cache",
+                cache_ttl_seconds=self._settings.cache_ttl_seconds,
+            )
+        except Exception:
+            LOGGER.debug(
+                "Background revalidation raised for %s; returning stale data.",
+                descriptor.key,
+                exc_info=True,
+            )
+            return record_to_envelope(
+                record,
+                source="stale-cache",
+                cache_ttl_seconds=self._settings.cache_ttl_seconds,
+            )
+
+        if not succeeded:
+            return record_to_envelope(
+                record,
+                source="stale-cache",
+                cache_ttl_seconds=self._settings.cache_ttl_seconds,
+            )
+
+        # The background task committed via its own session.  Expire any
+        # cached ORM state so the next SELECT sees the fresh row.
+        self._session.expire_all()
+        refreshed = await self._load_record(descriptor=descriptor)
+        if refreshed is not None:
+            return record_to_envelope(
+                refreshed,
+                source="upstream",
+                cache_ttl_seconds=self._settings.cache_ttl_seconds,
+            )
+        return record_to_envelope(
+            record,
+            source="stale-cache",
+            cache_ttl_seconds=self._settings.cache_ttl_seconds,
+        )
+
+    async def _blocking_refresh(
+        self,
+        *,
+        descriptor: MetadataDescriptor,
+        record: MetadataRecord | None,
+    ) -> MetadataEnvelope:
+        """Fetch upstream data synchronously within the request session."""
         adapter = self._provider_registry.get(descriptor.provider)
 
         try:

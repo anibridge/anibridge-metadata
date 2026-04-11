@@ -1,5 +1,6 @@
 """Service layer for metadata retrieval and caching."""
 
 from anibridge_metadata.services.cache import CacheService
+from anibridge_metadata.services.revalidator import BackgroundRevalidator
 
-__all__ = ["CacheService"]
+__all__ = ["BackgroundRevalidator", "CacheService"]

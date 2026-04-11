@@ -11,6 +11,7 @@ from anibridge_metadata.core.config import Settings, get_settings
 from anibridge_metadata.core.db import build_engine, init_db
 from anibridge_metadata.services.batch_refresh import BatchRefreshService
 from anibridge_metadata.services.providers.registry import ProviderRegistry
+from anibridge_metadata.services.revalidator import BackgroundRevalidator
 from anibridge_metadata.web.routes import router
 
 
@@ -26,6 +27,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         await provider_registry.start()
         await init_db(engine)
+
+        revalidator = BackgroundRevalidator(
+            session_factory=session_factory,
+            settings=resolved_settings,
+            provider_registry=provider_registry,
+        )
 
         batch_providers = provider_registry.batchable_providers()
         batch_refresh_service = BatchRefreshService(
@@ -45,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.provider_registry = provider_registry
         app.state.session_factory = session_factory
         app.state.settings = resolved_settings
+        app.state.revalidator = revalidator
         app.state.batch_refresh_service = batch_refresh_service
         # Store the background startup task so it can be cancelled or awaited later.
         app.state.batch_refresh_startup_task = startup_task
@@ -58,6 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await startup_task
 
         await batch_refresh_service.close()
+        await revalidator.close()
         await provider_registry.close()
         await engine.dispose()
 
