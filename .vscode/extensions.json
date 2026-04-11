@@ -6,6 +6,7 @@
         "esbenp.prettier-vscode",
         "ms-python.python",
         "tamasfe.even-better-toml",
+        "yy0931.vscode-sqlite3-editor",
         "yzhang.markdown-all-in-one"
     ]
 }
