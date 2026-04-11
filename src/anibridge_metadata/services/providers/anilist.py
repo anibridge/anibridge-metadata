@@ -1,7 +1,9 @@
 """AniList provider adapter."""
 
+import logging
+from collections.abc import AsyncGenerator
 from datetime import date
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -24,11 +26,14 @@ from anibridge_metadata.models.metadata import (
     build_titles,
 )
 from anibridge_metadata.services.providers.base import (
+    BatchableProvider,
     ProviderAdapter,
     ProviderPayload,
     UpstreamResponseError,
 )
 from anibridge_metadata.utils.http import HttpClientError
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AnilistFuzzyDatePayload(BaseModel):
@@ -67,7 +72,6 @@ class AnilistMediaPayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
     id: int
-    site_url: str | None = Field(default=None, alias="siteUrl")
     title: AnilistTitlePayload = Field(default_factory=AnilistTitlePayload)
     synonyms: list[str] = Field(default_factory=list)
     description: str | None = None
@@ -110,10 +114,33 @@ class AnilistGraphQLResponse(BaseModel):
     data: AnilistGraphQLDataPayload = Field(default_factory=AnilistGraphQLDataPayload)
 
 
-class AnilistAdapter(ProviderAdapter):
+class AnilistAdapter(ProviderAdapter, BatchableProvider):
     """Retrieve and normalize AniList anime metadata."""
 
     BASE_URL: ClassVar[str] = "https://graphql.anilist.co"
+
+    BATCH_PER_PAGE: ClassVar[int] = 50
+    BATCH_PAGES_PER_REQUEST: ClassVar[int] = 15
+
+    # Full field set used for the paginated batch refresh query.
+    _BATCH_MEDIA_FIELDS: ClassVar[str] = """
+        id
+        title { romaji english native }
+        synonyms
+        description(asHtml: false)
+        status
+        format
+        episodes
+        duration
+        averageScore
+        popularity
+        isAdult
+        genres
+        startDate { year month day }
+        endDate { year month day }
+        coverImage { extraLarge large medium }
+        bannerImage
+    """
 
     STATUS_MAP: ClassVar[dict[str, TitleStatus]] = {
         "CANCELLED": TitleStatus.CANCELLED,
@@ -122,44 +149,10 @@ class AnilistAdapter(ProviderAdapter):
         "NOT_YET_RELEASED": TitleStatus.UPCOMING,
         "RELEASING": TitleStatus.ONGOING,
     }
-    MEDIA_QUERY: ClassVar[str] = """
-        query ($id: Int) {
-        Media(id: $id, type: ANIME) {
-            id
-            siteUrl
-            title {
-            romaji
-            english
-            native
-            }
-            synonyms
-            description(asHtml: false)
-            status
-            format
-            episodes
-            duration
-            averageScore
-            popularity
-            isAdult
-            genres
-            startDate {
-            year
-            month
-            day
-            }
-            endDate {
-            year
-            month
-            day
-            }
-            coverImage {
-            extraLarge
-            large
-            medium
-            }
-            bannerImage
-        }
-        }
+    MEDIA_QUERY: ClassVar[str] = f"""
+        query ($id: Int) {{
+            Media(id: $id, type: ANIME) {{ {_BATCH_MEDIA_FIELDS} }}
+        }}
     """
 
     async def fetch_raw(self, *, descriptor: MetadataDescriptor) -> ProviderPayload:
@@ -249,7 +242,7 @@ class AnilistAdapter(ProviderAdapter):
                 popularity=payload.popularity,
             ),
             images=self._build_images(payload),
-            source=build_source(url=payload.site_url),
+            source=build_source(url=f"https://anilist.co/anime/{payload.id}"),
         )
 
     @staticmethod
@@ -292,3 +285,81 @@ class AnilistAdapter(ProviderAdapter):
                 MetadataImageModel(kind=ImageType.BANNER, url=payload.banner_image)
             )
         return images
+
+    async def iter_all_normalized(
+        self,
+    ) -> AsyncGenerator[tuple[str, UnifiedMetadata]]:
+        """Yield (descriptor_key, normalized) for every AniList anime entry.
+
+        Pages through all anime using alias-batched GraphQL requests (up to
+        `BATCH_PAGES_PER_REQUEST` page aliases per HTTP call, each page
+        containing up to `BATCH_PER_PAGE` entries).
+        """
+        page = 1
+        while True:
+            end_page = page + self.BATCH_PAGES_PER_REQUEST
+            batch_indices = list(range(page, end_page))
+            query, variables = self._build_batch_page_query(batch_indices)
+            try:
+                response_payload = await self.http_client.post_json(
+                    self.BASE_URL,
+                    json_body={"query": query, "variables": variables},
+                )
+            except HttpClientError as exc:
+                LOGGER.error(
+                    "AniList batch: HTTP error fetching pages %d-%d: %s",
+                    page,
+                    end_page - 1,
+                    exc,
+                )
+                break
+
+            data: dict[str, Any] = response_payload.get("data") or {}
+            has_more = False
+            for idx in batch_indices:
+                alias = f"p{idx}"
+                page_data = data.get(alias) or {}
+                media_list = page_data.get("media") or []
+                page_info = page_data.get("pageInfo") or {}
+                if page_info.get("hasNextPage"):
+                    has_more = True
+                for entry in media_list:
+                    try:
+                        payload = AnilistMediaPayload.model_validate(entry)
+                        descriptor = MetadataDescriptor(
+                            provider=DescriptorProvider.ANILIST,
+                            provider_id=str(payload.id),
+                        )
+                        normalized = await self.normalize(
+                            descriptor=descriptor, payload=payload
+                        )
+                    except (ValidationError, UpstreamResponseError, Exception) as exc:
+                        LOGGER.warning(
+                            "AniList batch: skipping entry %s: %s",
+                            entry.get("id"),
+                            exc,
+                        )
+                        continue
+                    yield descriptor.key, normalized
+
+            if not has_more:
+                break
+            page = end_page
+
+    def _build_batch_page_query(
+        self, page_indices: list[int]
+    ) -> tuple[str, dict[str, Any]]:
+        """Build an alias-batched GraphQL query for the given page numbers."""
+        page_blocks = "\n".join(
+            f"""
+            p{idx}: Page(page: {idx}, perPage: $perPage) {{
+                pageInfo {{ hasNextPage }}
+                media(type: ANIME, sort: ID) {{
+                    {self._BATCH_MEDIA_FIELDS}
+                }}
+            }}"""
+            for idx in page_indices
+        )
+        query = f"query ($perPage: Int!) {{{page_blocks}\n}}"
+        variables: dict[str, Any] = {"perPage": self.BATCH_PER_PAGE}
+        return query, variables

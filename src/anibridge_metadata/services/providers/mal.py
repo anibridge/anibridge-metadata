@@ -1,6 +1,8 @@
 """MyAnimeList provider adapter."""
 
-from typing import ClassVar
+import logging
+from collections.abc import AsyncGenerator
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -23,11 +25,14 @@ from anibridge_metadata.models.metadata import (
     build_titles,
 )
 from anibridge_metadata.services.providers.base import (
+    BatchableProvider,
     ProviderAdapter,
     ProviderPayload,
     UpstreamResponseError,
 )
 from anibridge_metadata.utils.http import HttpClientError
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MalAlternativeTitlesPayload(BaseModel):
@@ -80,7 +85,7 @@ class MalAnimePayload(BaseModel):
     main_picture: MalPicturePayload = Field(default_factory=MalPicturePayload)
 
 
-class MalAdapter(ProviderAdapter):
+class MalAdapter(ProviderAdapter, BatchableProvider):
     """Retrieve and normalize MyAnimeList anime metadata."""
 
     BASE_URL: ClassVar[str] = "https://api.myanimelist.net/v2"
@@ -202,3 +207,61 @@ class MalAdapter(ProviderAdapter):
         if duration_seconds is None:
             return None
         return int(duration_seconds / 60)
+
+    async def iter_all_normalized(
+        self,
+    ) -> AsyncGenerator[tuple[str, UnifiedMetadata]]:
+        """Yield (descriptor_key, normalized) for every anime in the MAL ranking.
+
+        Pages through the `ranking_type=all` endpoint (500 entries per page)
+        which covers the complete MAL anime catalogue.  Each ranking response
+        already includes all fields required for normalization, so no extra
+        per-entry requests are needed.
+        """
+        config = self.settings.mal
+        client_id = self.require(
+            config.client_id,
+            "MyAnimeList batch refresh requires ABM_MAL__CLIENT_ID.",
+        )
+        headers = {"X-MAL-CLIENT-ID": str(client_id)}
+        params: dict[str, str] = {
+            "ranking_type": "all",
+            "limit": "500",
+            "fields": MalAdapter.MAL_FIELDS,
+        }
+        url = f"{self.BASE_URL}/anime/ranking"
+        offset = 0
+
+        while True:
+            page_params = {**params, "offset": str(offset)}
+            try:
+                response: dict[str, Any] = await self.http_client.get_json(
+                    url, headers=headers, params=page_params
+                )
+            except HttpClientError as exc:
+                LOGGER.error("MAL batch: HTTP error at offset %d: %s", offset, exc)
+                break
+
+            data = response.get("data") or []
+            for entry in data:
+                node = entry.get("node") or {}
+                node_id = node.get("id")
+                if not node_id:
+                    continue
+                try:
+                    payload = MalAnimePayload.model_validate(node)
+                    descriptor = MetadataDescriptor(
+                        provider=DescriptorProvider.MAL,
+                        provider_id=str(node_id),
+                    )
+                    normalized = await self.normalize(
+                        descriptor=descriptor, payload=payload
+                    )
+                except (ValidationError, UpstreamResponseError, Exception) as exc:
+                    LOGGER.warning("MAL batch: skipping node %s: %s", node_id, exc)
+                    continue
+                yield descriptor.key, normalized
+
+            if not response.get("paging", {}).get("next"):
+                break
+            offset += len(data)

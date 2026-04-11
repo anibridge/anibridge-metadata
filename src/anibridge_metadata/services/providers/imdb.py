@@ -1,13 +1,17 @@
-"""IMDb provider adapter backed by the public QLever IMDb endpoint."""
+"""IMDB provider adapter backed by the public QLever IMDB endpoint."""
 
+import json
+import logging
 import re
+from collections.abc import AsyncGenerator
 from datetime import date
+from pathlib import Path
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from anibridge_metadata.core.descriptors import MetadataDescriptor
-from anibridge_metadata.core.enums import EntityType, TitleStatus
+from anibridge_metadata.core.enums import DescriptorProvider, EntityType, TitleStatus
 from anibridge_metadata.models.metadata import (
     MetadataRuntime,
     MetadataScope,
@@ -21,12 +25,21 @@ from anibridge_metadata.models.metadata import (
     build_titles,
 )
 from anibridge_metadata.services.providers.base import (
+    BatchableProvider,
     ProviderAdapter,
     ProviderPayload,
     UpstreamNotFoundError,
     UpstreamResponseError,
 )
 from anibridge_metadata.utils.http import HttpClientError
+
+LOGGER = logging.getLogger(__name__)
+
+# Path to the AniDB AnimeAggregations anime directory used when enumerating
+# IMDB IDs from AniDB cross-references during batch refresh.
+_ANIDB_ANIME_PATH: Path = (
+    Path(__file__).resolve().parents[4] / "data" / "anime-aggregations" / "anime"
+)
 
 
 class ImdbSparqlValue(BaseModel):
@@ -56,7 +69,7 @@ class ImdbSparqlResponse(BaseModel):
 
 
 class ImdbPayload(BaseModel):
-    """Normalized IMDb fields extracted from the QLever response."""
+    """Normalized IMDB fields extracted from the QLever response."""
 
     canonical_id: str
     label: str | None = None
@@ -75,7 +88,7 @@ class ImdbPayload(BaseModel):
 
     @classmethod
     def from_binding(cls, binding: dict[str, ImdbSparqlValue]) -> ImdbPayload:
-        """Build an IMDb payload from a single SPARQL result binding."""
+        """Build an IMDB payload from a single SPARQL result binding."""
         canonical_id = cls._required_text(binding, "canonicalId")
         return cls(
             canonical_id=canonical_id,
@@ -103,7 +116,7 @@ class ImdbPayload(BaseModel):
         """Return a required string field from a binding."""
         value = cls._text(binding, key)
         if value is None:
-            raise UpstreamResponseError(f"IMDb response did not include {key}.")
+            raise UpstreamResponseError(f"IMDB response did not include {key}.")
         return value
 
     @classmethod
@@ -125,7 +138,7 @@ class ImdbPayload(BaseModel):
             return int(value)
         except ValueError as exc:
             raise UpstreamResponseError(
-                f"IMDb field {key} was not an integer."
+                f"IMDB field {key} was not an integer."
             ) from exc
 
     @classmethod
@@ -137,7 +150,7 @@ class ImdbPayload(BaseModel):
         try:
             return float(value)
         except ValueError as exc:
-            raise UpstreamResponseError(f"IMDb field {key} was not numeric.") from exc
+            raise UpstreamResponseError(f"IMDB field {key} was not numeric.") from exc
 
     @classmethod
     def _bool(cls, binding: dict[str, ImdbSparqlValue], key: str) -> bool | None:
@@ -149,7 +162,7 @@ class ImdbPayload(BaseModel):
             return True
         if value == "false":
             return False
-        raise UpstreamResponseError(f"IMDb field {key} was not a boolean.")
+        raise UpstreamResponseError(f"IMDB field {key} was not a boolean.")
 
     @classmethod
     def _split(cls, binding: dict[str, ImdbSparqlValue], key: str) -> list[str]:
@@ -167,7 +180,7 @@ class ImdbPayload(BaseModel):
 
 
 class ImdbSeasonPayload(BaseModel):
-    """Derived season summary for an IMDb show."""
+    """Derived season summary for an IMDB show."""
 
     season_number: int
     episode_count: int | None = None
@@ -179,7 +192,7 @@ class ImdbSeasonPayload(BaseModel):
         """Build a season summary from a SPARQL aggregate binding."""
         season_number = ImdbPayload._int(binding, "season")
         if season_number is None:
-            raise UpstreamResponseError("IMDb season query did not include a season.")
+            raise UpstreamResponseError("IMDB season query did not include a season.")
         return cls(
             season_number=season_number,
             episode_count=ImdbPayload._int(binding, "episodeCount"),
@@ -188,8 +201,8 @@ class ImdbSeasonPayload(BaseModel):
         )
 
 
-class ImdbAdapter(ProviderAdapter):
-    """Retrieve and normalize IMDb metadata from the QLever IMDb endpoint."""
+class ImdbAdapter(ProviderAdapter, BatchableProvider):
+    """Retrieve and normalize IMDB metadata from the QLever IMDB endpoint."""
 
     BASE_URL: ClassVar[str] = "https://qlever.dev/api/imdb"
     TITLE_ID_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^tt\d+$")
@@ -261,11 +274,62 @@ class ImdbAdapter(ProviderAdapter):
             ORDER BY ?season
     """
 
+    # ------------------------------------------------------------------
+    # Batch refresh templates
+    # ------------------------------------------------------------------
+
+    BATCH_SIZE: ClassVar[int] = 50
+
+    BATCH_TITLE_QUERY: ClassVar[str] = """
+        SELECT
+          ?titleUri ?canonicalId ?label ?primaryTitle ?originalTitle ?typeValue
+          ?isAdult ?startYear ?endYear ?runtime ?rating ?votes
+          (GROUP_CONCAT(DISTINCT ?genre; separator="|||") AS ?genres)
+          (GROUP_CONCAT(DISTINCT ?alias; separator="|||") AS ?aliases)
+        WHERE {{
+          VALUES ?titleUri {{ {uri_list} }}
+          ?titleUri <https://www.imdb.com/id> ?canonicalId .
+          OPTIONAL {{ ?titleUri <http://www.w3.org/2000/01/rdf-schema#label> ?label }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/primaryTitle> ?primaryTitle }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/originalTitle> ?originalTitle }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/type> ?typeValue }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/isAdult> ?isAdult }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/startYear> ?startYear }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/endYear> ?endYear }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/runtimeMinutes> ?runtime }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/averageRating> ?rating }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/numVotes> ?votes }}
+          OPTIONAL {{ ?titleUri <https://www.imdb.com/genre> ?genre }}
+          OPTIONAL {{ ?titleUri <http://www.w3.org/2004/02/skos/core#altLabel> ?alias }}
+        }}
+        GROUP BY
+          ?titleUri ?canonicalId ?label ?primaryTitle ?originalTitle ?typeValue
+          ?isAdult ?startYear ?endYear ?runtime ?rating ?votes
+    """
+
+    BATCH_SEASON_QUERY: ClassVar[str] = """
+        SELECT
+          ?parentId ?season
+          (COUNT(DISTINCT ?episodeId) AS ?episodeCount)
+          (MIN(?episodeYear) AS ?seasonStartYear)
+          (MAX(?episodeYear) AS ?seasonEndYear)
+        WHERE {{
+          VALUES ?parent {{ {uri_list} }}
+          ?parent <https://www.imdb.com/id> ?parentId .
+          ?episode <https://www.imdb.com/parentTitle> ?parent ;
+              <https://www.imdb.com/id> ?episodeId ;
+              <https://www.imdb.com/seasonNumber> ?season .
+          OPTIONAL {{ ?episode <https://www.imdb.com/startYear> ?episodeYear }}
+        }}
+        GROUP BY ?parentId ?season
+        ORDER BY ?parentId ?season
+    """
+
     async def fetch_raw(self, *, descriptor: MetadataDescriptor) -> ProviderPayload:
-        """Fetch IMDb title metadata through the QLever SPARQL endpoint."""
+        """Fetch IMDB title metadata through the QLever SPARQL endpoint."""
         provider_id = descriptor.provider_id.strip()
         if self.TITLE_ID_PATTERN.fullmatch(provider_id) is None:
-            raise UpstreamResponseError("IMDb ids must look like tt1234567.")
+            raise UpstreamResponseError("IMDB ids must look like tt1234567.")
 
         try:
             response_payload = await self.http_client.get_json(
@@ -278,10 +342,10 @@ class ImdbAdapter(ProviderAdapter):
         try:
             response = ImdbSparqlResponse.model_validate(response_payload)
         except ValidationError as exc:
-            raise UpstreamResponseError("IMDb response validation failed.") from exc
+            raise UpstreamResponseError("IMDB response validation failed.") from exc
 
         if not response.results.bindings:
-            raise UpstreamNotFoundError("IMDb did not find the requested title.")
+            raise UpstreamNotFoundError("IMDB did not find the requested title.")
 
         payload = ImdbPayload.from_binding(response.results.bindings[0])
         resolved_kind = self._resolve_kind(payload.type_value, descriptor=descriptor)
@@ -295,9 +359,9 @@ class ImdbAdapter(ProviderAdapter):
         descriptor: MetadataDescriptor,
         payload: ProviderPayload,
     ) -> UnifiedMetadata:
-        """Normalize IMDb data into the shared metadata schema."""
+        """Normalize IMDB data into the shared metadata schema."""
         if not isinstance(payload, ImdbPayload):
-            raise UpstreamResponseError("IMDb payload was not an object.")
+            raise UpstreamResponseError("IMDB payload was not an object.")
 
         kind = self._resolve_kind(payload.type_value, descriptor=descriptor)
         show_status = self._map_status(payload=payload, kind=kind)
@@ -307,7 +371,7 @@ class ImdbAdapter(ProviderAdapter):
             payload.original_title,
         )
         if main_title is None:
-            raise UpstreamResponseError("IMDb response did not contain a title.")
+            raise UpstreamResponseError("IMDB response did not contain a title.")
 
         display_title = self.first_non_empty(payload.label, payload.primary_title)
         if display_title is None:
@@ -368,16 +432,16 @@ class ImdbAdapter(ProviderAdapter):
 
     @classmethod
     def _build_query(cls, provider_id: str) -> str:
-        """Build the one-shot SPARQL query for a specific IMDb id."""
+        """Build the one-shot SPARQL query for a specific IMDB id."""
         return cls.QUERY_TEMPLATE.format(title_uri=cls._title_url(provider_id))
 
     @classmethod
     def _build_season_query(cls, provider_id: str) -> str:
-        """Build the season aggregation query for an IMDb show."""
+        """Build the season aggregation query for an IMDB show."""
         return cls.SEASON_QUERY_TEMPLATE.format(title_uri=cls._title_url(provider_id))
 
     async def _fetch_seasons(self, provider_id: str) -> list[ImdbSeasonPayload]:
-        """Fetch season aggregates for an IMDb show."""
+        """Fetch season aggregates for an IMDB show."""
         try:
             response_payload = await self.http_client.get_json(
                 self.BASE_URL,
@@ -390,7 +454,7 @@ class ImdbAdapter(ProviderAdapter):
             response = ImdbSparqlResponse.model_validate(response_payload)
         except ValidationError as exc:
             raise UpstreamResponseError(
-                "IMDb season response validation failed."
+                "IMDB season response validation failed."
             ) from exc
 
         return [
@@ -400,7 +464,7 @@ class ImdbAdapter(ProviderAdapter):
 
     @staticmethod
     def _title_url(provider_id: str) -> str:
-        """Return the canonical IMDb title URL for an id."""
+        """Return the canonical IMDB title URL for an id."""
         return f"https://www.imdb.com/title/{provider_id}"
 
     @staticmethod
@@ -412,7 +476,7 @@ class ImdbAdapter(ProviderAdapter):
         show_runtime: MetadataRuntime | None = None,
         show_status: TitleStatus = TitleStatus.UNKNOWN,
     ) -> dict[str, MetadataScope] | None:
-        """Build scope entries from IMDb season aggregates."""
+        """Build scope entries from IMDB season aggregates."""
         if not payload.seasons:
             return None
 
@@ -472,13 +536,13 @@ class ImdbAdapter(ProviderAdapter):
 
         if resolved != requested:
             raise UpstreamNotFoundError(
-                "IMDb title type did not match the requested descriptor namespace."
+                "IMDB title type did not match the requested descriptor namespace."
             )
         return resolved
 
     @staticmethod
     def _map_status(*, payload: ImdbPayload, kind: EntityType) -> TitleStatus:
-        """Map IMDb year fields into the shared title lifecycle enum."""
+        """Map IMDB year fields into the shared title lifecycle enum."""
         current_year = date.today().year
         if payload.start_year is not None and payload.start_year > current_year:
             return TitleStatus.UPCOMING
@@ -515,3 +579,154 @@ class ImdbAdapter(ProviderAdapter):
         if season_number < last_regular_season:
             return TitleStatus.FINISHED
         return show_status
+
+    # ------------------------------------------------------------------
+    # Batch refresh implementation
+    # ------------------------------------------------------------------
+
+    async def iter_all_normalized(
+        self,
+    ) -> AsyncGenerator[tuple[str, UnifiedMetadata]]:
+        """Yield (descriptor_key, normalized) for every IMDB title in AniDB cross-refs.
+
+        Enumerates IMDB IDs from the local AniDB AnimeAggregations snapshot,
+        then fetches each batch of `BATCH_SIZE` IDs in a single QLever
+        SPARQL query (main titles and seasons combined).
+        """
+        imdb_ids = await self._enumerate_imdb_ids_from_anidb()
+        if not imdb_ids:
+            LOGGER.warning(
+                "IMDB batch: no IDs found in AniDB cross-references at %s.",
+                _ANIDB_ANIME_PATH,
+            )
+            return
+
+        id_list = sorted(imdb_ids)
+        LOGGER.info("IMDB batch: refreshing %d titles.", len(id_list))
+        for i in range(0, len(id_list), self.BATCH_SIZE):
+            batch = id_list[i : i + self.BATCH_SIZE]
+            async for item in self._fetch_batch_normalized(batch):
+                yield item
+
+    async def _fetch_batch_normalized(
+        self,
+        provider_ids: list[str],
+    ) -> AsyncGenerator[tuple[str, UnifiedMetadata]]:
+        """Fetch and normalize a batch of IMDB title IDs via QLever."""
+        uri_list = " ".join(f"<{self._title_url(pid)}>" for pid in provider_ids)
+
+        try:
+            raw = await self.http_client.get_json(
+                self.BASE_URL,
+                params={"query": self.BATCH_TITLE_QUERY.format(uri_list=uri_list)},
+            )
+        except HttpClientError as exc:
+            LOGGER.error("IMDB batch: HTTP error fetching title batch: %s", exc)
+            return
+
+        try:
+            response = ImdbSparqlResponse.model_validate(raw)
+        except ValidationError as exc:
+            LOGGER.error("IMDB batch: response validation error: %s", exc)
+            return
+
+        payloads: dict[str, ImdbPayload] = {}
+        for binding in response.results.bindings:
+            try:
+                payload = ImdbPayload.from_binding(binding)
+                payloads[payload.canonical_id] = payload
+            except (UpstreamResponseError, Exception) as exc:
+                LOGGER.warning("IMDB batch: skipping binding: %s", exc)
+
+        # Batch-fetch season data for all shows in this batch.
+        show_ids = [
+            pid
+            for pid in provider_ids
+            if pid in payloads and payloads[pid].type_value in self.SHOW_TYPES
+        ]
+        if show_ids:
+            seasons_by_id = await self._fetch_batch_seasons(show_ids)
+            for pid, seasons in seasons_by_id.items():
+                if pid in payloads:
+                    payloads[pid].seasons = seasons
+
+        for provider_id in provider_ids:
+            payload = payloads.get(provider_id)
+            if payload is None:
+                continue
+
+            if payload.type_value in self.MOVIE_TYPES:
+                provider_enum = DescriptorProvider.IMDB_MOVIE
+            elif payload.type_value in self.SHOW_TYPES:
+                provider_enum = DescriptorProvider.IMDB_SHOW
+            else:
+                continue  # unknown or unsupported type
+
+            descriptor = MetadataDescriptor(
+                provider=provider_enum,
+                provider_id=payload.canonical_id,
+            )
+            try:
+                normalized = await self.normalize(
+                    descriptor=descriptor, payload=payload
+                )
+            except (UpstreamResponseError, Exception) as exc:
+                LOGGER.warning("IMDB batch: skipping %s: %s", provider_id, exc)
+                continue
+            yield descriptor.key, normalized
+
+    async def _fetch_batch_seasons(
+        self,
+        provider_ids: list[str],
+    ) -> dict[str, list[ImdbSeasonPayload]]:
+        """Fetch season aggregates for a batch of IMDB show IDs via QLever."""
+        uri_list = " ".join(f"<{self._title_url(pid)}>" for pid in provider_ids)
+        try:
+            raw = await self.http_client.get_json(
+                self.BASE_URL,
+                params={"query": self.BATCH_SEASON_QUERY.format(uri_list=uri_list)},
+            )
+        except HttpClientError as exc:
+            LOGGER.error("IMDB batch seasons: HTTP error: %s", exc)
+            return {}
+
+        try:
+            response = ImdbSparqlResponse.model_validate(raw)
+        except ValidationError:
+            return {}
+
+        result: dict[str, list[ImdbSeasonPayload]] = {}
+        for binding in response.results.bindings:
+            try:
+                season = ImdbSeasonPayload.from_binding(binding)
+                parent_id = ImdbPayload._text(binding, "parentId")
+                if parent_id:
+                    result.setdefault(parent_id, []).append(season)
+            except UpstreamResponseError, Exception:
+                continue
+        return result
+
+    async def _enumerate_imdb_ids_from_anidb(self) -> set[str]:
+        """Scan the AniDB local snapshot for IMDB cross-reference IDs."""
+        if not _ANIDB_ANIME_PATH.is_dir():
+            return set()
+
+        imdb_ids: set[str] = set()
+        for path in _ANIDB_ANIME_PATH.glob("*.json"):
+            try:
+                data: dict = json.loads(path.read_text(encoding="utf-8"))
+                for raw_id in (data.get("resources") or {}).get("IMDB") or []:
+                    imdb_id = self._extract_imdb_id(str(raw_id))
+                    if imdb_id:
+                        imdb_ids.add(imdb_id)
+            except Exception:
+                continue
+        return imdb_ids
+
+    @staticmethod
+    def _extract_imdb_id(value: str) -> str | None:
+        """Extract a canonical IMDB title ID a string."""
+        match = re.search(r"tt\d+", value)
+        if match is None:
+            return None
+        return match.group(0)

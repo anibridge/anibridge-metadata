@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import shutil
+from collections.abc import AsyncGenerator
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -35,6 +36,7 @@ from anibridge_metadata.models.metadata import (
     build_titles,
 )
 from anibridge_metadata.services.providers.base import (
+    BatchableProvider,
     ProviderAdapter,
     ProviderConfigurationError,
     ProviderPayload,
@@ -234,7 +236,7 @@ class AniDbPayload(BaseModel):
         return round(sum(lengths) / len(lengths))
 
 
-class AniDbAdapter(ProviderAdapter):
+class AniDbAdapter(ProviderAdapter, BatchableProvider):
     """Retrieve and normalize AniDB metadata from a local AnimeAggregations clone."""
 
     REPOSITORY_URL: ClassVar[str] = "https://github.com/notseteve/AnimeAggregations.git"
@@ -279,6 +281,31 @@ class AniDbAdapter(ProviderAdapter):
         with suppress(asyncio.CancelledError):
             await self._sync_task
         self._sync_task = None
+
+    async def iter_all_normalized(self) -> AsyncGenerator[tuple[str, UnifiedMetadata]]:
+        """Yield (descriptor_key, normalized) for every anime in the local snapshot."""
+        await self._ensure_repository_ready()
+        anime_dir = self.REPOSITORY_PATH / "anime"
+        paths = sorted(anime_dir.glob("*.json"))
+        for path in paths:
+            provider_id = path.stem
+            descriptor = MetadataDescriptor(
+                provider=DescriptorProvider.ANIDB,
+                provider_id=provider_id,
+            )
+            try:
+                payload = await self.fetch_raw(descriptor=descriptor)
+                normalized = await self.normalize(
+                    descriptor=descriptor, payload=payload
+                )
+            except (
+                UpstreamNotFoundError,
+                UpstreamResponseError,
+                ProviderConfigurationError,
+            ):
+                LOGGER.warning("AniDB batch: skipping %s due to error", provider_id)
+                continue
+            yield descriptor.key, normalized
 
     async def fetch_raw(self, *, descriptor: MetadataDescriptor) -> ProviderPayload:
         """Fetch AniDB metadata from the local AnimeAggregations checkout."""
