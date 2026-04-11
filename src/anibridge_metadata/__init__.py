@@ -1,0 +1,1 @@
+"""AniBridge metadata caching server."""
