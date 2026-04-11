@@ -7,6 +7,7 @@ from anibridge_metadata.core.enums import DescriptorProvider
 from anibridge_metadata.services.providers.anidb import AniDbAdapter
 from anibridge_metadata.services.providers.anilist import AnilistAdapter
 from anibridge_metadata.services.providers.base import (
+    BatchableProvider,
     ProviderAdapter,
     ProviderConfigurationError,
 )
@@ -90,6 +91,23 @@ class ProviderRegistry:
     def _unique_http_clients(self) -> set[HttpClient]:
         """Return unique HTTP client instances from the registry."""
         return set(self._http_clients.values())
+
+    def batchable_providers(self) -> dict[str, BatchableProvider]:
+        """Return all registered adapters whose class inherits BatchableProvider.
+
+        Duplicate adapter instances (e.g. IMDB_MOVIE and IMDB_SHOW share one
+        adapter) are deduplicated by identity so each adapter appears once.
+        """
+        seen: set[int] = set()
+        result: dict[str, BatchableProvider] = {}
+        for provider, adapter in self._providers.items():
+            if not isinstance(adapter, BatchableProvider):
+                continue
+            if id(adapter) in seen:
+                continue
+            seen.add(id(adapter))
+            result[provider.value] = adapter
+        return result
 
     def _build_http_client(
         self,

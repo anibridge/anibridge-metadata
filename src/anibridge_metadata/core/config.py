@@ -70,6 +70,20 @@ class TmdbConfig(ProviderConfig):
     access_token: str | None = None
 
 
+class BatchRefreshConfig(BaseModel):
+    """Configuration for the scheduled full-catalog batch refresh."""
+
+    enabled: bool = False
+    cron: str = Field(
+        default="0 3 * * *",
+        description="Cron expression (UTC) controlling when to run the batch refresh.",
+    )
+    refresh_on_startup: bool = Field(
+        default=False,
+        description="Run a full batch refresh immediately when the service starts.",
+    )
+
+
 class Settings(BaseSettings):
     """Runtime configuration for the metadata service."""
 
@@ -95,6 +109,7 @@ class Settings(BaseSettings):
     imdb: ImdbConfig = Field(default_factory=ImdbConfig)
     tvdb: TvdbConfig = Field(default_factory=TvdbConfig)
     tmdb: TmdbConfig = Field(default_factory=TmdbConfig)
+    batch_refresh: BatchRefreshConfig = Field(default_factory=BatchRefreshConfig)
 
     @property
     def cache_ttl(self) -> timedelta:

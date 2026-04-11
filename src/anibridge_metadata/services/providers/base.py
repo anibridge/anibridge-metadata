@@ -1,7 +1,7 @@
 """Base provider adapter contracts and shared helpers."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import date
 from typing import Any, Literal, TypeVar
 
@@ -119,3 +119,16 @@ class ProviderAdapter(ABC):
         if value is None:
             return default
         return mapping.get(value, default)
+
+
+class BatchableProvider(ABC):
+    """Mixin for provider adapters that support full-catalog batch refresh.
+
+    Providers implementing this interface can efficiently populate the cache
+    for all known IDs by streaming normalized metadata without hitting the
+    per-descriptor `fetch_raw` / `normalize` round-trip for each entry.
+    """
+
+    @abstractmethod
+    def iter_all_normalized(self) -> AsyncIterator[tuple[str, UnifiedMetadata]]:
+        """Yield `(descriptor_key, normalized_metadata)` for every known item."""

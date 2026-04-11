@@ -29,6 +29,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.1",
     "sqlalchemy>=2.0.49",
+    "croniter>=6.2.2",
 ]
 
 [tool.ruff]
