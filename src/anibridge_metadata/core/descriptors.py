@@ -2,14 +2,19 @@
 
 import re
 from dataclasses import dataclass
+from typing import Final
 
 from anibridge.utils.mappings import descriptor_key, parse_mapping_descriptor
 
 from anibridge_metadata.core.enums import DescriptorProvider, EntityType
 
 SEASON_SCOPE_PATTERN = re.compile(r"^s(?P<number>\d+)$", re.IGNORECASE)
+ANIDB_SCOPE_PATTERN = re.compile(r"^[A-Z]$")
+
+ANIDB_SCOPE_CODES: Final[frozenset[str]] = frozenset({"R", "S", "C", "T", "P", "O"})
 
 SCOPED_PROVIDERS = {
+    DescriptorProvider.ANIDB,
     DescriptorProvider.TMDB_SHOW,
     DescriptorProvider.TVDB_SHOW,
 }
@@ -77,13 +82,26 @@ def parse_descriptor(value: str) -> MetadataDescriptor:
         )
 
     if provider in SCOPED_PROVIDERS and scope is not None:
-        match = SEASON_SCOPE_PATTERN.fullmatch(scope)
-        if match is None:
-            raise DescriptorValidationError(
-                f"Scoped {provider.value!r} descriptors must use season scopes "
-                "like 's1'."
-            )
-        if int(match.group("number")) < 0:
-            raise DescriptorValidationError("Season scopes must be non-negative.")
+        if provider == DescriptorProvider.ANIDB:
+            normalized_scope = scope.upper()
+            if ANIDB_SCOPE_PATTERN.fullmatch(normalized_scope) is None:
+                raise DescriptorValidationError(
+                    "Scoped 'anidb' descriptors must use one-letter episode type "
+                    "codes like 'R' for regular or 'S' for special."
+                )
+            if normalized_scope not in ANIDB_SCOPE_CODES:
+                raise DescriptorValidationError(
+                    "AniDB scopes must be one of: R, S, C, T, P, O."
+                )
+            scope = normalized_scope
+        else:
+            match = SEASON_SCOPE_PATTERN.fullmatch(scope)
+            if match is None:
+                raise DescriptorValidationError(
+                    f"Scoped {provider.value!r} descriptors must use season scopes "
+                    "like 's1'."
+                )
+            if int(match.group("number")) < 0:
+                raise DescriptorValidationError("Season scopes must be non-negative.")
 
     return MetadataDescriptor(provider=provider, provider_id=provider_id, scope=scope)

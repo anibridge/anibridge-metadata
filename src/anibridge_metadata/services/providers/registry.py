@@ -74,12 +74,16 @@ class ProviderRegistry:
         return adapter
 
     async def start(self) -> None:
-        """Start all provider HTTP clients."""
+        """Start shared HTTP clients and provider-specific resources."""
         for http_client in self._unique_http_clients():
             await http_client.start()
+        for provider in self._providers.values():
+            await provider.start()
 
     async def close(self) -> None:
-        """Close all provider HTTP clients."""
+        """Close provider-specific resources and shared HTTP clients."""
+        for provider in self._providers.values():
+            await provider.close()
         for http_client in self._unique_http_clients():
             await http_client.close()
 

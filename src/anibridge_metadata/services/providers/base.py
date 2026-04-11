@@ -59,6 +59,14 @@ class ProviderAdapter(ABC):
     ) -> UnifiedMetadata:
         """Normalize provider-specific data into the shared metadata model."""
 
+    async def start(self) -> None:
+        """Start provider-specific background resources."""
+        return None
+
+    async def close(self) -> None:
+        """Close provider-specific background resources."""
+        return None
+
     def require(self, value: str | int | None, message: str) -> str | int:
         """Validate a required setting value."""
         if value in (None, ""):
