@@ -1,11 +1,9 @@
-"""IMDB provider adapter backed by the public QLever IMDB endpoint."""
+"""IMDB provider adapter backed by the public QLever endpoints."""
 
-import json
 import logging
 import re
 from collections.abc import AsyncGenerator
 from datetime import date
-from pathlib import Path
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -34,12 +32,6 @@ from anibridge_metadata.services.providers.base import (
 from anibridge_metadata.utils.http import HttpClientError
 
 LOGGER = logging.getLogger(__name__)
-
-# Path to the AniDB AnimeAggregations anime directory used when enumerating
-# IMDB IDs from AniDB cross-references during batch refresh.
-_ANIDB_ANIME_PATH: Path = (
-    Path(__file__).resolve().parents[4] / "data" / "anime-aggregations" / "anime"
-)
 
 
 class ImdbSparqlValue(BaseModel):
@@ -202,9 +194,10 @@ class ImdbSeasonPayload(BaseModel):
 
 
 class ImdbAdapter(ProviderAdapter, BatchableProvider):
-    """Retrieve and normalize IMDB metadata from the QLever IMDB endpoint."""
+    """Retrieve and normalize IMDB metadata from the QLever endpoints."""
 
     BASE_URL: ClassVar[str] = "https://qlever.dev/api/imdb"
+    WIKIDATA_URL: ClassVar[str] = "https://qlever.dev/api/wikidata"
     TITLE_ID_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^tt\d+$")
     MOVIE_TYPES: ClassVar[frozenset[str]] = frozenset(
         {"movie", "short", "tvMovie", "tvShort", "video"}
@@ -212,6 +205,21 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
     SHOW_TYPES: ClassVar[frozenset[str]] = frozenset(
         {"tvEpisode", "tvMiniSeries", "tvSeries"}
     )
+    WIKIDATA_IMDB_IDS_QUERY: ClassVar[str] = """
+        PREFIX wd: <http://www.wikidata.org/entity/>
+        PREFIX wdt: <http://www.wikidata.org/prop/direct/>
+
+        SELECT DISTINCT ?imdbId WHERE {
+          VALUES ?animeType {
+            wd:Q20650540
+            wd:Q63952888
+          }
+
+          ?item wdt:P31/wdt:P279* ?animeType ;
+                wdt:P345 ?imdbId .
+        }
+        LIMIT 500000
+    """
     QUERY_TEMPLATE: ClassVar[str] = """
         SELECT
           ?canonicalId
@@ -587,18 +595,15 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
     async def iter_all_normalized(
         self,
     ) -> AsyncGenerator[tuple[str, UnifiedMetadata]]:
-        """Yield (descriptor_key, normalized) for every IMDB title in AniDB cross-refs.
+        """Yield (descriptor_key, normalized) for every anime IMDB title in Wikidata.
 
-        Enumerates IMDB IDs from the local AniDB AnimeAggregations snapshot,
-        then fetches each batch of `BATCH_SIZE` IDs in a single QLever
-        SPARQL query (main titles and seasons combined).
+        Enumerates anime IMDB IDs from the QLever Wikidata endpoint, then
+        fetches each batch of `BATCH_SIZE` IDs in a single QLever IMDB SPARQL
+        query (main titles and seasons combined).
         """
-        imdb_ids = await self._enumerate_imdb_ids_from_anidb()
+        imdb_ids = await self._enumerate_imdb_ids_from_wikidata()
         if not imdb_ids:
-            LOGGER.warning(
-                "IMDB batch: no IDs found in AniDB cross-references at %s.",
-                _ANIDB_ANIME_PATH,
-            )
+            LOGGER.warning("IMDB batch: no anime IMDB IDs found in Wikidata.")
             return
 
         id_list = sorted(imdb_ids)
@@ -706,26 +711,33 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
                 continue
         return result
 
-    async def _enumerate_imdb_ids_from_anidb(self) -> set[str]:
-        """Scan the AniDB local snapshot for IMDB cross-reference IDs."""
-        if not _ANIDB_ANIME_PATH.is_dir():
+    async def _enumerate_imdb_ids_from_wikidata(self) -> set[str]:
+        """Load anime IMDB IDs from the QLever Wikidata endpoint."""
+        try:
+            raw = await self.http_client.get_json(
+                self.WIKIDATA_URL,
+                params={"query": self.WIKIDATA_IMDB_IDS_QUERY, "format": "json"},
+            )
+        except HttpClientError as exc:
+            LOGGER.error("IMDB batch: HTTP error fetching Wikidata IDs: %s", exc)
+            return set()
+
+        try:
+            response = ImdbSparqlResponse.model_validate(raw)
+        except ValidationError as exc:
+            LOGGER.error("IMDB batch: Wikidata response validation error: %s", exc)
             return set()
 
         imdb_ids: set[str] = set()
-        for path in _ANIDB_ANIME_PATH.glob("*.json"):
-            try:
-                data: dict = json.loads(path.read_text(encoding="utf-8"))
-                for raw_id in (data.get("resources") or {}).get("IMDB") or []:
-                    imdb_id = self._extract_imdb_id(str(raw_id))
-                    if imdb_id:
-                        imdb_ids.add(imdb_id)
-            except Exception:
-                continue
+        for binding in response.results.bindings:
+            imdb_id = self._extract_imdb_id(ImdbPayload._text(binding, "imdbId") or "")
+            if imdb_id is not None:
+                imdb_ids.add(imdb_id)
         return imdb_ids
 
     @staticmethod
     def _extract_imdb_id(value: str) -> str | None:
-        """Extract a canonical IMDB title ID a string."""
+        """Extract a canonical IMDB title ID from a string."""
         match = re.search(r"tt\d+", value)
         if match is None:
             return None

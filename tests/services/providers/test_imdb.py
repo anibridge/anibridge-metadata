@@ -309,3 +309,93 @@ async def test_imdb_normalize_rejects_descriptor_type_mismatch() -> None:
                 type_value="tvSeries",
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_imdb_enumerate_ids_uses_wikidata_qlever_and_dedupes() -> None:
+    http_client = FakeHttpClient(
+        responses=[
+            {
+                "head": {"vars": ["imdbId"]},
+                "results": {
+                    "bindings": [
+                        {"imdbId": {"type": "literal", "value": "tt0903747"}},
+                        {
+                            "imdbId": {
+                                "type": "literal",
+                                "value": "https://www.imdb.com/title/tt0137523/",
+                            }
+                        },
+                        {"imdbId": {"type": "literal", "value": "invalid"}},
+                        {"imdbId": {"type": "literal", "value": "tt0903747"}},
+                    ]
+                },
+            }
+        ]
+    )
+    adapter = ImdbAdapter(
+        settings=Settings(),
+        http_client=cast(HttpClient, http_client),
+    )
+
+    imdb_ids = await adapter._enumerate_imdb_ids_from_wikidata()
+
+    assert imdb_ids == {"tt0137523", "tt0903747"}
+    assert http_client.calls == [
+        {
+            "url": "https://qlever.dev/api/wikidata",
+            "headers": None,
+            "params": {
+                "query": adapter.WIKIDATA_IMDB_IDS_QUERY,
+                "format": "json",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_imdb_iter_all_normalized_seeds_batches_from_wikidata() -> None:
+    http_client = FakeHttpClient(
+        responses=[
+            {
+                "head": {"vars": ["imdbId"]},
+                "results": {
+                    "bindings": [{"imdbId": {"type": "literal", "value": "tt0137523"}}]
+                },
+            },
+            {
+                "head": {
+                    "vars": [
+                        "canonicalId",
+                        "primaryTitle",
+                        "typeValue",
+                        "runtime",
+                    ]
+                },
+                "results": {
+                    "bindings": [
+                        {
+                            "canonicalId": {"type": "literal", "value": "tt0137523"},
+                            "primaryTitle": {
+                                "type": "literal",
+                                "value": "Fight Club",
+                            },
+                            "typeValue": {"type": "literal", "value": "movie"},
+                            "runtime": {"type": "literal", "value": "139"},
+                        }
+                    ]
+                },
+            },
+        ]
+    )
+    adapter = ImdbAdapter(
+        settings=Settings(),
+        http_client=cast(HttpClient, http_client),
+    )
+
+    items = [item async for item in adapter.iter_all_normalized()]
+
+    assert [key for key, _metadata in items] == ["imdb_movie:tt0137523"]
+    assert len(http_client.calls) == 2
+    assert http_client.calls[0]["url"] == "https://qlever.dev/api/wikidata"
+    assert http_client.calls[1]["url"] == "https://qlever.dev/api/imdb"
