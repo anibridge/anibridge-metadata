@@ -45,7 +45,7 @@ class AnilistConfig(ProviderConfig):
 class MalConfig(ProviderConfig):
     """Configuration for MyAnimeList provider integration."""
 
-    client_id: str | None = None
+    client_id: str | None = "b11a4e1ead0db8142268906b4bb676a4"
     rate_limiter: RateLimiterConfig | None = Field(
         default_factory=lambda: RateLimiterConfig(rate=1, capacity=1)
     )
