@@ -15,6 +15,7 @@ ANIDB_SCOPE_CODES: Final[frozenset[str]] = frozenset({"R", "S", "C", "T", "P", "
 
 SCOPED_PROVIDERS = {
     DescriptorProvider.ANIDB,
+    DescriptorProvider.IMDB_SHOW,
     DescriptorProvider.TMDB_SHOW,
     DescriptorProvider.TVDB_SHOW,
 }

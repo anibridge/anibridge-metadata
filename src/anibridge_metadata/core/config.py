@@ -54,7 +54,7 @@ class MalConfig(ProviderConfig):
 class ImdbConfig(ProviderConfig):
     """Configuration for IMDB provider integration."""
 
-    api_key: str | None = None
+    pass
 
 
 class TvdbConfig(ProviderConfig):
