@@ -4,8 +4,69 @@ from datetime import timedelta
 from importlib.metadata import version
 
 from anibridge.utils.cache import cache
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class RateLimiterConfig(BaseModel):
+    """Configuration for provider rate limiter."""
+
+    rate: float = Field(default=..., gt=0, description="Tokens added per second")
+    capacity: int = Field(
+        default=1, gt=0, description="Maximum number of tokens in the bucket"
+    )
+
+
+class ProviderConfig(BaseModel):
+    """Base configuration for a metadata provider."""
+
+    rate_limiter: RateLimiterConfig | None = None
+
+
+class AniDbConfig(ProviderConfig):
+    """Configuration for AniDB provider integration."""
+
+    client: str | None = None
+    client_version: str | None = None
+    rate_limiter: RateLimiterConfig | None = Field(
+        default_factory=lambda: RateLimiterConfig(rate=0.5, capacity=1)
+    )
+
+
+class AnilistConfig(ProviderConfig):
+    """Configuration for Anilist provider integration."""
+
+    rate_limiter: RateLimiterConfig | None = Field(
+        default_factory=lambda: RateLimiterConfig(rate=0.5, capacity=4)
+    )
+
+
+class MalConfig(ProviderConfig):
+    """Configuration for MyAnimeList provider integration."""
+
+    client_id: str | None = None
+    rate_limiter: RateLimiterConfig | None = Field(
+        default_factory=lambda: RateLimiterConfig(rate=1, capacity=1)
+    )
+
+
+class ImdbConfig(ProviderConfig):
+    """Configuration for IMDB provider integration."""
+
+    api_key: str | None = None
+
+
+class TvdbConfig(ProviderConfig):
+    """Configuration for TVDB provider integration."""
+
+    api_key: str | None = None
+    pin: str | None = None
+
+
+class TmdbConfig(ProviderConfig):
+    """Configuration for TMDB provider integration."""
+
+    access_token: str | None = None
 
 
 class Settings(BaseSettings):
@@ -26,6 +87,13 @@ class Settings(BaseSettings):
     user_agent: str = Field(
         default_factory=lambda: f"anibridge-metadata/{version('anibridge-metadata')}"
     )
+
+    anidb: AniDbConfig = Field(default_factory=AniDbConfig)
+    anilist: AnilistConfig = Field(default_factory=AnilistConfig)
+    mal: MalConfig = Field(default_factory=MalConfig)
+    imdb: ImdbConfig = Field(default_factory=ImdbConfig)
+    tvdb: TvdbConfig = Field(default_factory=TvdbConfig)
+    tmdb: TmdbConfig = Field(default_factory=TmdbConfig)
 
     @property
     def cache_ttl(self) -> timedelta:
