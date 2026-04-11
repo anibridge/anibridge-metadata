@@ -20,6 +20,7 @@ class RateLimiterConfig(BaseModel):
 class ProviderConfig(BaseModel):
     """Base configuration for a metadata provider."""
 
+    enabled: bool = True
     rate_limiter: RateLimiterConfig | None = None
 
 

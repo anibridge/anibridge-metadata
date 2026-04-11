@@ -2,11 +2,14 @@
 
 from anibridge.utils.limiter import Limiter
 
-from anibridge_metadata.core.config import RateLimiterConfig, Settings
+from anibridge_metadata.core.config import ProviderConfig, RateLimiterConfig, Settings
 from anibridge_metadata.core.enums import DescriptorProvider
 from anibridge_metadata.services.providers.anidb import AniDbAdapter
 from anibridge_metadata.services.providers.anilist import AnilistAdapter
-from anibridge_metadata.services.providers.base import ProviderAdapter
+from anibridge_metadata.services.providers.base import (
+    ProviderAdapter,
+    ProviderConfigurationError,
+)
 from anibridge_metadata.services.providers.imdb import ImdbAdapter
 from anibridge_metadata.services.providers.mal import MalAdapter
 from anibridge_metadata.services.providers.tmdb import TmdbAdapter
@@ -19,17 +22,21 @@ class ProviderRegistry:
 
     def __init__(self, *, settings: Settings) -> None:
         """Create a registry populated with all supported providers."""
-        client_keys = {
-            "anidb": settings.anidb.rate_limiter,
-            "anilist": settings.anilist.rate_limiter,
-            "imdb": settings.imdb.rate_limiter,
-            "mal": settings.mal.rate_limiter,
-            "tmdb": settings.tmdb.rate_limiter,
-            "tvdb": settings.tvdb.rate_limiter,
+        provider_configs: dict[str, ProviderConfig] = {
+            "anidb": settings.anidb,
+            "anilist": settings.anilist,
+            "imdb": settings.imdb,
+            "mal": settings.mal,
+            "tmdb": settings.tmdb,
+            "tvdb": settings.tvdb,
         }
         clients = {
-            key: self._build_http_client(settings=settings, rate_limiter=rate_limiter)
-            for key, rate_limiter in client_keys.items()
+            key: self._build_http_client(
+                settings=settings,
+                rate_limiter=config.rate_limiter,
+            )
+            for key, config in provider_configs.items()
+            if config.enabled
         }
         provider_specs: dict[DescriptorProvider, tuple[type[ProviderAdapter], str]] = {
             DescriptorProvider.ANIDB: (AniDbAdapter, "anidb"),
@@ -42,18 +49,29 @@ class ProviderRegistry:
             DescriptorProvider.TVDB_MOVIE: (TvdbAdapter, "tvdb"),
             DescriptorProvider.TVDB_SHOW: (TvdbAdapter, "tvdb"),
         }
+        self._provider_keys = {
+            provider: client_key for provider, (_, client_key) in provider_specs.items()
+        }
         self._http_clients = {
             provider: clients[client_key]
             for provider, (_, client_key) in provider_specs.items()
+            if client_key in clients
         }
         self._providers = {
             provider: adapter_type(settings=settings, http_client=clients[client_key])
             for provider, (adapter_type, client_key) in provider_specs.items()
+            if client_key in clients
         }
 
     def get(self, provider: DescriptorProvider) -> ProviderAdapter:
         """Return the adapter for a specific provider."""
-        return self._providers[provider]
+        adapter = self._providers.get(provider)
+        if adapter is None:
+            client_key = self._provider_keys[provider].upper()
+            raise ProviderConfigurationError(
+                f"{provider.value} lookups are disabled via ABM_{client_key}__ENABLED."
+            )
+        return adapter
 
     async def start(self) -> None:
         """Start all provider HTTP clients."""
