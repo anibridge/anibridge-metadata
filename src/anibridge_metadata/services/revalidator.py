@@ -1,6 +1,5 @@
 """Background revalidation for stale cache entries."""
 
-
 import asyncio
 import logging
 from contextlib import suppress

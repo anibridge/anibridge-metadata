@@ -88,7 +88,7 @@ class BatchRefreshService:
             else:
                 count, errors = result
                 LOGGER.info(
-                    "Batch refresh: provider '%s' complete — %d upserted, %d errors.",
+                    "Batch refresh: provider '%s' complete: %d upserted, %d errors.",
                     name,
                     count,
                     errors,

@@ -94,8 +94,8 @@ class CacheService:
                 record=record,
             )
 
-        # No stale data to fall back on (or force_refresh requested) —
-        # perform a blocking upstream fetch in the request session.
+        # No stale data to fall back on (or force_refresh requested).
+        # Perform a blocking upstream fetch in the request session.
         return await self._blocking_refresh(
             descriptor=descriptor,
             record=record,
