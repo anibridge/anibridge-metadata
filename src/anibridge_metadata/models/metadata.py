@@ -1,6 +1,6 @@
 """Shared Pydantic models for normalized metadata."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -212,7 +212,7 @@ def build_relationship(*, descriptor: str, kind: EntityType) -> MetadataRelation
 class CacheState(BaseModel):
     """Cache metadata returned alongside normalized title data."""
 
-    fetched_at: datetime
+    updated_at: datetime
     expires_at: datetime
     stale: bool
     source: Literal["cache", "stale-cache", "upstream"]
@@ -242,15 +242,16 @@ def record_to_envelope(
     record: MetadataRecord,
     *,
     source: Literal["cache", "stale-cache", "upstream"],
+    cache_ttl_seconds: int,
 ) -> MetadataEnvelope:
     """Convert a persisted metadata record into an API response envelope."""
     now = datetime.now(UTC)
-    fetched_at = ensure_utc(record.fetched_at)
-    expires_at = ensure_utc(record.expires_at)
+    updated_at = ensure_utc(record.updated_at)
+    expires_at = updated_at + timedelta(seconds=cache_ttl_seconds)
     return MetadataEnvelope(
         metadata=record_to_metadata(record),
         cache=CacheState(
-            fetched_at=fetched_at,
+            updated_at=updated_at,
             expires_at=expires_at,
             stale=expires_at <= now,
             source=source,

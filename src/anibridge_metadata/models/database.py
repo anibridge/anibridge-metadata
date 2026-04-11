@@ -24,14 +24,6 @@ class MetadataRecord(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     descriptor: Mapped[str] = mapped_column(SqlString(255), nullable=False, index=True)
     normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    raw_payload: Mapped[dict[str, Any] | list[Any] | str | None] = mapped_column(JSON)
-    fetched_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow
-    )
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow

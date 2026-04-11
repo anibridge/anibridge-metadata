@@ -100,13 +100,12 @@ class ProviderAdapter(ABC):
 
     @staticmethod
     def first_non_empty(*values: str | None) -> str | None:
-        """Return the first non-empty string after trimming whitespace."""
+        """Return the first non-empty value from the candidates."""
         for value in values:
-            if value is None:
-                continue
-            cleaned = value.strip()
-            if cleaned:
-                return cleaned
+            if value:
+                cleaned = value.strip()
+                if cleaned:
+                    return cleaned
         return None
 
     @staticmethod
@@ -116,7 +115,7 @@ class ProviderAdapter(ABC):
         *,
         default: MappedValue,
     ) -> MappedValue:
-        """Map a provider value through a lookup table with a default fallback."""
+        """Map a raw string value through a dict with a fallback default."""
         if value is None:
             return default
         return mapping.get(value, default)
