@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from importlib.metadata import version
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
 from anibridge_metadata.core.config import Settings, get_settings
@@ -73,6 +74,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
         title="anibridge-metadata",
         version=version("anibridge-metadata"),
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
     app.include_router(router)
 
