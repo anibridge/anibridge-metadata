@@ -589,7 +589,7 @@ class AniDbAdapter(ProviderAdapter, BatchableProvider):
 
             start_date, end_date = cls._episode_date_bounds(episodes)
             runtime_minutes = cls._episode_runtime_minutes(episodes)
-            units = len(episodes) or None
+            units = len(episodes)
             if (
                 start_date is None
                 and end_date is None

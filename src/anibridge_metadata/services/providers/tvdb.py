@@ -81,6 +81,16 @@ class TvdbTranslationPayload(BaseModel):
     overview: str | None = None
 
 
+class TvdbReleasePayload(BaseModel):
+    """TVDB first_release object embedded in movie responses."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    country: str | None = None
+    date: str | None = None
+    detail: str | None = None
+
+
 class TvdbRemoteIdPayload(BaseModel):
     """TVDB remote id payload from the On Other Sites section."""
 
@@ -131,7 +141,9 @@ class TvdbPayload(BaseModel):
     aliases: list[str | TvdbAliasPayload] = Field(default_factory=list)
     status: TvdbStatusPayload | str | None = None
     first_aired: str | None = Field(default=None, alias="firstAired")
-    first_release: str | None = Field(default=None, alias="first_release")
+    first_release: TvdbReleasePayload | None = Field(
+        default=None, alias="first_release"
+    )
     last_aired: str | None = Field(default=None, alias="lastAired")
     average_runtime: int | None = Field(default=None, alias="averageRuntime")
     runtime: int | None = None
@@ -247,7 +259,8 @@ class TvdbAdapter(ProviderAdapter):
             synopsis=payload.overview,
             release=build_release(
                 start_date=self.coerce_date(
-                    payload.first_aired or payload.first_release
+                    payload.first_aired
+                    or (payload.first_release.date if payload.first_release else None)
                 ),
                 end_date=self.coerce_date(payload.last_aired),
                 status=show_status,
@@ -258,8 +271,11 @@ class TvdbAdapter(ProviderAdapter):
                 if resolved_entity_type == EntityType.MOVIE
                 else "derived",
             ),
-            units=len([e for e in payload.episodes if (e.season_number or 0) > 0])
-            or None,
+            units=(
+                len([e for e in payload.episodes if (e.season_number or 0) > 0]) or None
+            )
+            if resolved_entity_type == EntityType.SHOW
+            else 1,
             classification=build_classification(
                 genres=[genre.name for genre in payload.genres if genre.name],
             ),

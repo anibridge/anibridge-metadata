@@ -282,10 +282,6 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
             ORDER BY ?season
     """
 
-    # ------------------------------------------------------------------
-    # Batch refresh templates
-    # ------------------------------------------------------------------
-
     BATCH_SIZE: ClassVar[int] = 50
 
     BATCH_TITLE_QUERY: ClassVar[str] = """
@@ -423,7 +419,7 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
                 status=show_status,
             ),
             runtime=runtime,
-            units=payload.episode_count if kind == EntityType.SHOW else None,
+            units=payload.episode_count if kind == EntityType.SHOW else 1,
             classification=build_classification(
                 is_adult=payload.is_adult,
                 genres=self.dedupe(payload.genres),
@@ -587,10 +583,6 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
         if season_number < last_regular_season:
             return TitleStatus.FINISHED
         return show_status
-
-    # ------------------------------------------------------------------
-    # Batch refresh implementation
-    # ------------------------------------------------------------------
 
     async def iter_all_normalized(
         self,

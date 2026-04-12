@@ -31,7 +31,11 @@ async def test_tvdb_movie_normalization_uses_first_release_and_runtime() -> None
         {
             "_resolved_entity_type": "movie",
             "name": "Fight Club",
-            "first_release": "1999-10-15",
+            "first_release": {
+                "country": "global",
+                "date": "1999-10-15",
+                "detail": None,
+            },
             "runtime": 139,
             "score": 1298345,
             "status": {"name": "Released"},

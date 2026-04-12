@@ -188,11 +188,6 @@ def test_record_to_envelope_normalizes_naive_datetimes() -> None:
     assert envelope.cache.expires_at.tzinfo == UTC
 
 
-# ---------------------------------------------------------------------------
-# Stale-while-revalidate tests
-# ---------------------------------------------------------------------------
-
-
 class SlowAdapter:
     """Adapter that takes a configurable delay before returning data."""
 

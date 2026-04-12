@@ -198,7 +198,9 @@ class TmdbAdapter(ProviderAdapter):
                 if resolved_entity_type == EntityType.MOVIE
                 else "derived",
             ),
-            units=payload.number_of_episodes,
+            units=payload.number_of_episodes
+            if resolved_entity_type == EntityType.SHOW
+            else 1,
             classification=build_classification(
                 is_adult=payload.adult or False,
                 genres=genres,
