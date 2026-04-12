@@ -16,7 +16,7 @@ from anibridge_metadata.core.config import (
 @pytest.fixture
 def test_settings() -> Settings:
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        redis_url="redis://localhost:6379/15",
         anidb=AniDbConfig(enabled=False),
         anilist=AnilistConfig(enabled=False),
         imdb=ImdbConfig(enabled=False),

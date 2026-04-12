@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from datetime import date
 from typing import ClassVar
 
+import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from anibridge_metadata.core.descriptors import MetadataDescriptor
@@ -31,7 +32,7 @@ from anibridge_metadata.services.providers.base import (
 )
 from anibridge_metadata.utils.http import HttpClientError
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class ImdbSparqlValue(BaseModel):
@@ -205,6 +206,7 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
     SHOW_TYPES: ClassVar[frozenset[str]] = frozenset(
         {"tvEpisode", "tvMiniSeries", "tvSeries"}
     )
+    _SPARQL_TIMEOUT: ClassVar[aiohttp.ClientTimeout] = aiohttp.ClientTimeout(total=120)
     WIKIDATA_IMDB_IDS_QUERY: ClassVar[str] = """
         PREFIX wd: <http://www.wikidata.org/entity/>
         PREFIX wdt: <http://www.wikidata.org/prop/direct/>
@@ -595,11 +597,11 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
         """
         imdb_ids = await self._enumerate_imdb_ids_from_wikidata()
         if not imdb_ids:
-            LOGGER.warning("IMDB batch: no anime IMDB IDs found in Wikidata.")
+            logger.warning("IMDB batch: no anime IMDB IDs found in Wikidata.")
             return
 
         id_list = sorted(imdb_ids)
-        LOGGER.info("IMDB batch: refreshing %d titles.", len(id_list))
+        logger.info("IMDB batch: refreshing %d titles.", len(id_list))
         for i in range(0, len(id_list), self.BATCH_SIZE):
             batch = id_list[i : i + self.BATCH_SIZE]
             async for item in self._fetch_batch_normalized(batch):
@@ -616,15 +618,19 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
             raw = await self.http_client.get_json(
                 self.BASE_URL,
                 params={"query": self.BATCH_TITLE_QUERY.format(uri_list=uri_list)},
+                timeout=self._SPARQL_TIMEOUT,
             )
+        except TimeoutError:
+            logger.error("IMDB batch: title query timed out")
+            return
         except HttpClientError as exc:
-            LOGGER.error("IMDB batch: HTTP error fetching title batch: %s", exc)
+            logger.error("IMDB batch: HTTP error fetching title batch: %s", exc)
             return
 
         try:
             response = ImdbSparqlResponse.model_validate(raw)
         except ValidationError as exc:
-            LOGGER.error("IMDB batch: response validation error: %s", exc)
+            logger.error("IMDB batch: response validation error: %s", exc)
             return
 
         payloads: dict[str, ImdbPayload] = {}
@@ -633,7 +639,7 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
                 payload = ImdbPayload.from_binding(binding)
                 payloads[payload.canonical_id] = payload
             except (UpstreamResponseError, Exception) as exc:
-                LOGGER.warning("IMDB batch: skipping binding: %s", exc)
+                logger.warning("IMDB batch: skipping binding: %s", exc)
 
         # Batch-fetch season data for all shows in this batch.
         show_ids = [
@@ -668,7 +674,7 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
                     descriptor=descriptor, payload=payload
                 )
             except (UpstreamResponseError, Exception) as exc:
-                LOGGER.warning("IMDB batch: skipping %s: %s", provider_id, exc)
+                logger.warning("IMDB batch: skipping %s: %s", provider_id, exc)
                 continue
             yield descriptor.key, normalized
 
@@ -682,9 +688,13 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
             raw = await self.http_client.get_json(
                 self.BASE_URL,
                 params={"query": self.BATCH_SEASON_QUERY.format(uri_list=uri_list)},
+                timeout=self._SPARQL_TIMEOUT,
             )
+        except TimeoutError:
+            logger.error("IMDB batch seasons: query timed out")
+            return {}
         except HttpClientError as exc:
-            LOGGER.error("IMDB batch seasons: HTTP error: %s", exc)
+            logger.error("IMDB batch seasons: HTTP error: %s", exc)
             return {}
 
         try:
@@ -699,7 +709,7 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
                 parent_id = ImdbPayload._text(binding, "parentId")
                 if parent_id:
                     result.setdefault(parent_id, []).append(season)
-            except UpstreamResponseError, Exception:
+            except Exception:
                 continue
         return result
 
@@ -709,15 +719,19 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
             raw = await self.http_client.get_json(
                 self.WIKIDATA_URL,
                 params={"query": self.WIKIDATA_IMDB_IDS_QUERY, "format": "json"},
+                timeout=self._SPARQL_TIMEOUT,
             )
+        except TimeoutError:
+            logger.error("IMDB batch: Wikidata query timed out (120s)")
+            return set()
         except HttpClientError as exc:
-            LOGGER.error("IMDB batch: HTTP error fetching Wikidata IDs: %s", exc)
+            logger.error("IMDB batch: HTTP error fetching Wikidata IDs: %s", exc)
             return set()
 
         try:
             response = ImdbSparqlResponse.model_validate(raw)
         except ValidationError as exc:
-            LOGGER.error("IMDB batch: Wikidata response validation error: %s", exc)
+            logger.error("IMDB batch: Wikidata response validation error: %s", exc)
             return set()
 
         imdb_ids: set[str] = set()

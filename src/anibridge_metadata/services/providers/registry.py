@@ -1,5 +1,7 @@
 """Registry for upstream provider adapters."""
 
+import logging
+
 from anibridge.utils.limiter import Limiter
 
 from anibridge_metadata.core.config import ProviderConfig, RateLimiterConfig, Settings
@@ -16,6 +18,8 @@ from anibridge_metadata.services.providers.mal import MalAdapter
 from anibridge_metadata.services.providers.tmdb import TmdbAdapter
 from anibridge_metadata.services.providers.tvdb import TvdbAdapter
 from anibridge_metadata.utils.http import HttpClient
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderRegistry:
@@ -74,12 +78,21 @@ class ProviderRegistry:
             )
         return adapter
 
+    def enabled_providers(self) -> list[str]:
+        """Return names of all enabled providers."""
+        return sorted({p.value for p in self._providers})
+
     async def start(self) -> None:
         """Start shared HTTP clients and provider-specific resources."""
         for http_client in self._unique_http_clients():
             await http_client.start()
         for provider in self._providers.values():
             await provider.start()
+        logger.info(
+            "Provider registry started (%d adapters, %d HTTP clients).",
+            len(self._providers),
+            len(self._unique_http_clients()),
+        )
 
     async def close(self) -> None:
         """Close provider-specific resources and shared HTTP clients."""
@@ -87,6 +100,7 @@ class ProviderRegistry:
             await provider.close()
         for http_client in self._unique_http_clients():
             await http_client.close()
+        logger.info("Provider registry closed.")
 
     def _unique_http_clients(self) -> set[HttpClient]:
         """Return unique HTTP client instances from the registry."""

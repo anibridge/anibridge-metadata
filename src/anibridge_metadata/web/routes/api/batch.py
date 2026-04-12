@@ -1,104 +1,120 @@
-"""Batch metadata lookup routes."""
+"""Batch metadata lookup via SSE and WebSocket streaming."""
 
-import asyncio
+import logging
+from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, status
+import orjson
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from anibridge_metadata.core.descriptors import DescriptorValidationError
-from anibridge_metadata.models.metadata import MetadataEnvelope
-from anibridge_metadata.services.cache import CacheService
-from anibridge_metadata.services.providers.base import ProviderError
-from anibridge_metadata.web.dependencies import get_cache_service
+from anibridge_metadata.services.batch_collector import BatchCollector, BatchResult
+from anibridge_metadata.web.dependencies import get_batch_collector, get_settings
 
 __all__ = ["router"]
 
-router = APIRouter()
+logger = logging.getLogger(__name__)
 
-_MAX_BATCH_SIZE = 50
+router = APIRouter()
 
 
 class BatchRequest(BaseModel):
     """Request body for batch metadata lookups."""
 
-    descriptors: list[str] = Field(..., min_length=1, max_length=_MAX_BATCH_SIZE)
+    descriptors: list[str] = Field(..., min_length=1)
 
 
-class BatchItemError(BaseModel):
-    """Error detail for a single descriptor in a batch response."""
-
-    status_code: int
-    detail: str
-
-
-class BatchResponse(BaseModel):
-    """Response envelope for batch metadata lookups."""
-
-    results: dict[str, MetadataEnvelope] = Field(default_factory=dict)
-    errors: dict[str, BatchItemError] = Field(default_factory=dict)
+async def _sse_stream(
+    collector: BatchCollector,
+    descriptors: list[str],
+) -> AsyncIterator[str]:
+    """Yield SSE as results resolve."""
+    async for result in collector.stream(descriptors):
+        payload = _result_to_dict(result)
+        data = orjson.dumps(payload).decode()
+        yield f"data: {data}\n\n"
+    yield "event: done\ndata: {}\n\n"
 
 
-def _error_for_exception(exc: Exception) -> BatchItemError:
-    """Map a provider/validation exception to a batch error entry."""
-    from anibridge_metadata.services.providers.base import (
-        ProviderConfigurationError,
-        UpstreamNotFoundError,
-        UpstreamResponseError,
-    )
-
-    if isinstance(exc, DescriptorValidationError):
-        return BatchItemError(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        )
-    if isinstance(exc, ProviderConfigurationError):
-        return BatchItemError(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        )
-    if isinstance(exc, UpstreamNotFoundError):
-        return BatchItemError(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    if isinstance(exc, UpstreamResponseError):
-        return BatchItemError(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
-    if isinstance(exc, ProviderError):
-        return BatchItemError(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        )
-    return BatchItemError(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="Internal server error",
-    )
+def _result_to_dict(result: BatchResult) -> dict:
+    """Serialize a BatchResult to a JSON dict."""
+    if result.envelope is not None:
+        return {
+            "descriptor": result.descriptor,
+            "status": "ok",
+            "data": result.envelope.model_dump(mode="json"),
+        }
+    return {
+        "descriptor": result.descriptor,
+        "status": "error",
+        "status_code": result.status_code,
+        "detail": result.error or "Unknown error",
+    }
 
 
-async def _fetch_one(
-    descriptor: str, service: CacheService
-) -> MetadataEnvelope | Exception:
-    """Fetch a single descriptor, returning the envelope or the exception."""
-    try:
-        return await service.get_metadata(descriptor=descriptor)
-    except Exception as exc:
-        return exc
-
-
-@router.post("", response_model=BatchResponse)
-async def batch_get_metadata(
+@router.post("/stream")
+async def batch_stream_sse(
     body: BatchRequest,
-    service: CacheService = Depends(get_cache_service),
-) -> BatchResponse:
-    """Lookup metadata for multiple descriptors in one request."""
-    unique_descriptors = list(dict.fromkeys(body.descriptors))
+    collector: BatchCollector = Depends(get_batch_collector),
+    settings=Depends(get_settings),
+) -> StreamingResponse:
+    """Stream batch metadata results as SSE.
 
-    tasks = [_fetch_one(d, service) for d in unique_descriptors]
-    outcomes = await asyncio.gather(*tasks)
+    Results are streamed to the client as they resolve. No need to wait
+    for all descriptors to finish before seeing results.
+    """
+    max_size = settings.batch_max_size
+    descriptors = body.descriptors[:max_size]
+    logger.info("Batch SSE: %d descriptor(s)", len(descriptors))
+    return StreamingResponse(
+        _sse_stream(collector, descriptors),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
-    results: dict[str, MetadataEnvelope] = {}
-    errors: dict[str, BatchItemError] = {}
 
-    for descriptor, outcome in zip(unique_descriptors, outcomes, strict=False):
-        if isinstance(outcome, Exception):
-            errors[descriptor] = _error_for_exception(outcome)
-        else:
-            results[descriptor] = outcome
+@router.websocket("/ws")
+async def batch_websocket(
+    websocket: WebSocket,
+    collector: BatchCollector = Depends(get_batch_collector),
+    settings=Depends(get_settings),
+) -> None:
+    """Stream batch metadata results over a WebSocket connection.
 
-    return BatchResponse(results=results, errors=errors)
+    Client sends a JSON message: `{"descriptors": ["anilist:21", ...]}`
+    Server streams back individual result messages as they resolve, then
+    sends `{"event": "done"}`.
+    """
+    await websocket.accept()
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = orjson.loads(raw)
+                descriptors = msg.get("descriptors", [])
+                if not isinstance(descriptors, list) or not descriptors:
+                    await websocket.send_json(
+                        {
+                            "event": "error",
+                            "detail": "descriptors must be a non-empty list",
+                        }
+                    )
+                    continue
+                max_size = settings.batch_max_size
+                descriptors = descriptors[:max_size]
+                logger.info("Batch WS: %d descriptor(s)", len(descriptors))
+            except orjson.JSONDecodeError, AttributeError:
+                await websocket.send_json({"event": "error", "detail": "Invalid JSON"})
+                continue
+
+            async for result in collector.stream(descriptors):
+                payload = _result_to_dict(result)
+                payload["event"] = "result"
+                await websocket.send_bytes(orjson.dumps(payload))
+
+            await websocket.send_bytes(orjson.dumps({"event": "done"}))
+    except WebSocketDisconnect:
+        logger.debug("Batch WebSocket client disconnected.")

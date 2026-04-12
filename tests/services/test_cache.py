@@ -1,28 +1,23 @@
+"""Tests for the Redis-backed cache layer and resolver."""
+
 import asyncio
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from anibridge_metadata.core.config import Settings
-from anibridge_metadata.core.db import build_engine, init_db
-from anibridge_metadata.core.descriptors import MetadataDescriptor, parse_descriptor
+from anibridge_metadata.core.descriptors import MetadataDescriptor
 from anibridge_metadata.core.enums import DescriptorProvider, EntityType, ImageType
-from anibridge_metadata.models.database import MetadataRecord
 from anibridge_metadata.models.metadata import (
     MetadataImageModel,
     UnifiedMetadata,
     build_classification,
     build_metadata_id,
     build_titles,
-    record_to_envelope,
 )
-from anibridge_metadata.services.cache import CacheService
+from anibridge_metadata.services.cache import CacheLayer
 from anibridge_metadata.services.providers.base import UpstreamNotFoundError
-from anibridge_metadata.services.revalidator import BackgroundRevalidator
+from anibridge_metadata.services.resolver import Resolver
 
 
 class FakePayload(BaseModel):
@@ -76,35 +71,63 @@ class FakeRegistry:
         return self.adapter
 
 
+class FakeRedis:
+    """Minimal in-memory Redis mock for cache tests."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, bytes] = {}
+        self._ttls: dict[str, int] = {}
+
+    async def get(self, key: str) -> bytes | None:
+        return self._store.get(key)
+
+    async def set(self, key: str, value: bytes, *, ex: int | None = None) -> None:
+        self._store[key] = value
+        if ex is not None:
+            self._ttls[key] = ex
+
+    async def delete(self, *keys: str) -> None:
+        for key in keys:
+            self._store.pop(key, None)
+            self._ttls.pop(key, None)
+
+    async def ttl(self, key: str) -> int:
+        return self._ttls.get(key, -1)
+
+    async def ping(self) -> bool:
+        return True
+
+    async def aclose(self) -> None:
+        pass
+
+
 @pytest.fixture
-async def cache_dependencies() -> AsyncIterator[tuple[Settings, async_sessionmaker]]:
-    settings = Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+def settings() -> Settings:
+    return Settings(
+        redis_url="redis://localhost:6379/15",
         cache_ttl_seconds=3600,
     )
-    engine = build_engine(settings)
-    await init_db(engine)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield settings, session_factory
-    await engine.dispose()
+
+
+@pytest.fixture
+def fake_redis() -> FakeRedis:
+    return FakeRedis()
+
+
+@pytest.fixture
+def cache(fake_redis: FakeRedis, settings: Settings) -> CacheLayer:
+    return CacheLayer(redis=fake_redis, settings=settings)  # ty: ignore[invalid-argument-type]
 
 
 @pytest.mark.asyncio
-async def test_cache_service_uses_cached_record(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
+async def test_resolver_fetches_and_caches(
+    cache: CacheLayer, settings: Settings
 ) -> None:
-    settings, session_factory = cache_dependencies
     adapter = FakeAdapter()
+    resolver = Resolver(cache=cache, provider_registry=FakeRegistry(adapter))
 
-    async with session_factory() as session:
-        service = CacheService(
-            session=session,
-            settings=settings,
-            provider_registry=FakeRegistry(adapter),
-        )
-
-        first = await service.get_metadata(descriptor="anilist:1")
-        second = await service.get_metadata(descriptor="anilist:1")
+    first = await resolver.resolve(descriptor="anilist:1")
+    second = await resolver.resolve(descriptor="anilist:1")
 
     assert first.cache.source == "upstream"
     assert second.cache.source == "cache"
@@ -112,287 +135,37 @@ async def test_cache_service_uses_cached_record(
 
 
 @pytest.mark.asyncio
-async def test_cache_service_refreshes_stale_record(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
+async def test_resolver_resolves_scoped_descriptor_to_parent(
+    cache: CacheLayer, settings: Settings
 ) -> None:
-    settings, session_factory = cache_dependencies
     adapter = FakeAdapter()
+    resolver = Resolver(cache=cache, provider_registry=FakeRegistry(adapter))
 
-    async with session_factory() as session:
-        service = CacheService(
-            session=session,
-            settings=settings,
-            provider_registry=FakeRegistry(adapter),
-        )
-
-        await service.get_metadata(descriptor="anilist:1")
-
-        result = await session.execute(select(MetadataRecord))
-        record = result.scalar_one()
-        record.updated_at = datetime.now(UTC) - timedelta(
-            seconds=settings.cache_ttl_seconds + 1
-        )
-        await session.commit()
-
-        refreshed = await service.get_metadata(descriptor="anilist:1")
-
-    assert refreshed.cache.source == "upstream"
-    assert adapter.calls == ["anilist:1", "anilist:1"]
-
-
-@pytest.mark.asyncio
-async def test_cache_service_resolves_scoped_descriptor_to_parent(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
-) -> None:
-    settings, session_factory = cache_dependencies
-    adapter = FakeAdapter()
-
-    async with session_factory() as session:
-        service = CacheService(
-            session=session,
-            settings=settings,
-            provider_registry=FakeRegistry(adapter),
-        )
-
-        envelope = await service.get_metadata(descriptor="tmdb_show:44:s1")
-        result = await session.execute(
-            select(MetadataRecord).order_by(MetadataRecord.descriptor)
-        )
-        descriptors = [record.descriptor for record in result.scalars().all()]
+    envelope = await resolver.resolve(descriptor="tmdb_show:44:s1")
 
     assert envelope.metadata.kind == EntityType.SHOW
     assert envelope.metadata.id.descriptor == "tmdb_show:44"
-    assert descriptors == ["tmdb_show:44"]
     assert adapter.calls == ["tmdb_show:44"]
 
 
-def test_record_to_envelope_normalizes_naive_datetimes() -> None:
-    metadata = UnifiedMetadata(
-        kind=EntityType.SHOW,
-        id=build_metadata_id(
-            descriptor="anilist:1",
-            provider=DescriptorProvider.ANILIST,
-            provider_id="1",
-        ),
-        titles=build_titles(display="Cowboy Bebop"),
-        classification=build_classification(),
-    )
-    record = MetadataRecord(
-        descriptor="anilist:1",
-        normalized_payload=metadata.model_dump(mode="json"),
-        updated_at=datetime(2026, 4, 11, 0, 0),
-    )
-
-    envelope = record_to_envelope(record, source="cache", cache_ttl_seconds=21600)
-
-    assert envelope.cache.updated_at.tzinfo == UTC
-    assert envelope.cache.expires_at.tzinfo == UTC
-
-
-class SlowAdapter:
-    """Adapter that takes a configurable delay before returning data."""
-
-    def __init__(self, delay: float = 10.0, title: str = "Fresh Title") -> None:
-        self.delay = delay
-        self.title = title
-        self.calls: list[str] = []
-
-    async def fetch_raw(self, *, descriptor: MetadataDescriptor) -> FakePayload:
-        self.calls.append(descriptor.key)
-        await asyncio.sleep(self.delay)
-        return FakePayload(
-            entity_type=descriptor.requested_entity_type.value,
-            id=descriptor.provider_id,
-            title=self.title,
-        )
-
-    async def normalize(
-        self,
-        *,
-        descriptor: MetadataDescriptor,
-        payload: FakePayload,
-    ) -> UnifiedMetadata:
-        return UnifiedMetadata(
-            kind=descriptor.requested_entity_type,
-            id=build_metadata_id(
-                descriptor=descriptor.key,
-                provider=descriptor.provider,
-                provider_id=descriptor.provider_id,
-            ),
-            titles=build_titles(display=payload.title),
-            classification=build_classification(),
-        )
-
-
-class SlowRegistry:
-    def __init__(self, adapter: SlowAdapter) -> None:
-        self.adapter = adapter
-
-    def get(self, provider: DescriptorProvider) -> SlowAdapter:
-        return self.adapter
-
-
-async def _seed_stale_record(
-    session_factory: async_sessionmaker,
-    settings: Settings,
-    descriptor: str = "anilist:1",
-    title: str = "Stale Title",
-) -> None:
-    """Insert a record that is already past its cache TTL."""
-    metadata = UnifiedMetadata(
-        kind=EntityType.SHOW,
-        id=build_metadata_id(
-            descriptor=descriptor,
-            provider=DescriptorProvider.ANILIST,
-            provider_id=descriptor.split(":")[1],
-        ),
-        titles=build_titles(display=title),
-        classification=build_classification(),
-    )
-    async with session_factory() as session:
-        record = MetadataRecord(
-            descriptor=descriptor,
-            normalized_payload=metadata.model_dump(mode="json"),
-        )
-        session.add(record)
-        await session.flush()
-        record.updated_at = datetime.now(UTC) - timedelta(
-            seconds=settings.cache_ttl_seconds + 1
-        )
-        await session.commit()
-
-
 @pytest.mark.asyncio
-async def test_stale_while_revalidate_returns_stale_on_timeout(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
+async def test_resolver_deduplicates_concurrent_requests(
+    cache: CacheLayer, settings: Settings
 ) -> None:
-    """When upstream is slow, stale data is returned within the timeout."""
-    settings, session_factory = cache_dependencies
-    settings.stale_timeout_seconds = 0.1  # very short so the test is fast
-    adapter = SlowAdapter(delay=5.0, title="Fresh Title")
-    registry = SlowRegistry(adapter)
-
-    revalidator = BackgroundRevalidator(
-        session_factory=session_factory,
-        settings=settings,
-        provider_registry=registry,
-    )
-
-    await _seed_stale_record(session_factory, settings)
-
-    async with session_factory() as session:
-        service = CacheService(
-            session=session,
-            settings=settings,
-            provider_registry=registry,
-            revalidator=revalidator,
-        )
-        envelope = await service.get_metadata(descriptor="anilist:1")
-
-    assert envelope.cache.source == "stale-cache"
-    assert envelope.metadata.titles.display == "Stale Title"
-
-    await revalidator.close()
-
-
-@pytest.mark.asyncio
-async def test_stale_while_revalidate_returns_fresh_when_fast(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
-) -> None:
-    """When upstream replies quickly, fresh data is returned."""
-    settings, session_factory = cache_dependencies
-    settings.stale_timeout_seconds = 5.0
-    adapter = SlowAdapter(delay=0.0, title="Fresh Title")
-    registry = SlowRegistry(adapter)
-
-    revalidator = BackgroundRevalidator(
-        session_factory=session_factory,
-        settings=settings,
-        provider_registry=registry,
-    )
-
-    await _seed_stale_record(session_factory, settings)
-
-    async with session_factory() as session:
-        service = CacheService(
-            session=session,
-            settings=settings,
-            provider_registry=registry,
-            revalidator=revalidator,
-        )
-        envelope = await service.get_metadata(descriptor="anilist:1")
-
-    assert envelope.cache.source == "upstream"
-    assert envelope.metadata.titles.display == "Fresh Title"
-
-    await revalidator.close()
-
-
-@pytest.mark.asyncio
-async def test_stale_while_revalidate_deduplicates_tasks(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
-) -> None:
-    """Concurrent requests for the same descriptor share one background task."""
-    settings, session_factory = cache_dependencies
-    settings.stale_timeout_seconds = 0.05
-    adapter = SlowAdapter(delay=5.0)
-    registry = SlowRegistry(adapter)
-
-    revalidator = BackgroundRevalidator(
-        session_factory=session_factory,
-        settings=settings,
-        provider_registry=registry,
-    )
-
-    await _seed_stale_record(session_factory, settings)
-
-    descriptor = parse_descriptor("anilist:1")
-    task_a = revalidator.schedule(descriptor)
-    task_b = revalidator.schedule(descriptor)
-
-    assert task_a is task_b
-
-    await revalidator.close()
-
-
-@pytest.mark.asyncio
-async def test_force_refresh_bypasses_stale_while_revalidate(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
-) -> None:
-    """force_refresh=True should do a blocking fetch, not stale-while-revalidate."""
-    settings, session_factory = cache_dependencies
     adapter = FakeAdapter()
-    registry = FakeRegistry(adapter)
+    resolver = Resolver(cache=cache, provider_registry=FakeRegistry(adapter))
 
-    revalidator = BackgroundRevalidator(
-        session_factory=session_factory,
-        settings=settings,
-        provider_registry=registry,
+    results = await asyncio.gather(
+        resolver.resolve(descriptor="anilist:1"),
+        resolver.resolve(descriptor="anilist:1"),
     )
 
-    await _seed_stale_record(session_factory, settings, title="Stale Title")
-
-    async with session_factory() as session:
-        service = CacheService(
-            session=session,
-            settings=settings,
-            provider_registry=registry,
-            revalidator=revalidator,
-        )
-        envelope = await service.get_metadata(
-            descriptor="anilist:1", force_refresh=True
-        )
-
-    assert envelope.cache.source == "upstream"
-    # The blocking refresh should have been called via the request session.
+    assert len(results) == 2
+    # Only one upstream call despite two concurrent requests
     assert adapter.calls == ["anilist:1"]
-
-    await revalidator.close()
 
 
 class NotFoundAdapter:
-    """Adapter that always raises UpstreamNotFoundError."""
-
     def __init__(self) -> None:
         self.calls: list[str] = []
 
@@ -413,84 +186,57 @@ class NotFoundRegistry:
 
 
 @pytest.mark.asyncio
-async def test_404_is_cached_and_served_from_cache(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
-) -> None:
-    """A 404 should be cached; the second call should not hit the provider."""
-    settings, session_factory = cache_dependencies
+async def test_404_is_cached(cache: CacheLayer, settings: Settings) -> None:
     adapter = NotFoundAdapter()
+    resolver = Resolver(cache=cache, provider_registry=NotFoundRegistry(adapter))
 
-    async with session_factory() as session:
-        service = CacheService(
-            session=session,
-            settings=settings,
-            provider_registry=NotFoundRegistry(adapter),
-        )
+    with pytest.raises(UpstreamNotFoundError):
+        await resolver.resolve(descriptor="anilist:999")
 
-        with pytest.raises(UpstreamNotFoundError):
-            await service.get_metadata(descriptor="anilist:999")
+    # Second call should raise from cache without contacting the provider.
+    with pytest.raises(UpstreamNotFoundError, match="Cached 404"):
+        await resolver.resolve(descriptor="anilist:999")
 
-        # Second call should raise from cache without contacting the provider.
-        with pytest.raises(UpstreamNotFoundError, match="Cached 404"):
-            await service.get_metadata(descriptor="anilist:999")
-
-    # Provider was only called once.
     assert adapter.calls == ["anilist:999"]
 
 
 @pytest.mark.asyncio
-async def test_stale_404_retries_upstream(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
+async def test_force_refresh_bypasses_cache(
+    cache: CacheLayer, settings: Settings
 ) -> None:
-    """When a cached 404 becomes stale, the next request retries the provider."""
-    settings, session_factory = cache_dependencies
-    adapter = NotFoundAdapter()
+    adapter = FakeAdapter()
+    resolver = Resolver(cache=cache, provider_registry=FakeRegistry(adapter))
 
-    async with session_factory() as session:
-        service = CacheService(
-            session=session,
-            settings=settings,
-            provider_registry=NotFoundRegistry(adapter),
-        )
+    first = await resolver.resolve(descriptor="anilist:1")
+    second = await resolver.resolve(descriptor="anilist:1", force_refresh=True)
 
-        with pytest.raises(UpstreamNotFoundError):
-            await service.get_metadata(descriptor="anilist:999")
-
-        # Expire the record.
-        result = await session.execute(select(MetadataRecord))
-        record = result.scalar_one()
-        record.updated_at = datetime.now(UTC) - timedelta(
-            seconds=settings.cache_ttl_seconds + 1
-        )
-        await session.commit()
-
-        with pytest.raises(UpstreamNotFoundError):
-            await service.get_metadata(descriptor="anilist:999")
-
-    # Provider was called twice: once initially, once after expiry.
-    assert adapter.calls == ["anilist:999", "anilist:999"]
+    assert first.cache.source == "upstream"
+    assert second.cache.source == "upstream"
+    assert adapter.calls == ["anilist:1", "anilist:1"]
 
 
 @pytest.mark.asyncio
-async def test_force_refresh_bypasses_cached_404(
-    cache_dependencies: tuple[Settings, async_sessionmaker],
-) -> None:
-    """force_refresh=True should retry the provider even when 404 is cached."""
-    settings, session_factory = cache_dependencies
-    adapter = NotFoundAdapter()
+async def test_cache_layer_ping(cache: CacheLayer) -> None:
+    await cache.ping()
 
-    async with session_factory() as session:
-        service = CacheService(
-            session=session,
-            settings=settings,
-            provider_registry=NotFoundRegistry(adapter),
-        )
 
-        with pytest.raises(UpstreamNotFoundError):
-            await service.get_metadata(descriptor="anilist:999")
+@pytest.mark.asyncio
+async def test_cache_layer_put_and_get(cache: CacheLayer) -> None:
+    metadata = UnifiedMetadata(
+        kind=EntityType.SHOW,
+        id=build_metadata_id(
+            descriptor="anilist:1",
+            provider=DescriptorProvider.ANILIST,
+            provider_id="1",
+        ),
+        titles=build_titles(display="Test"),
+        classification=build_classification(),
+    )
+    await cache.put("anilist:1", metadata)
+    entry = await cache.get("anilist:1")
 
-        with pytest.raises(UpstreamNotFoundError):
-            await service.get_metadata(descriptor="anilist:999", force_refresh=True)
-
-    # Provider was called twice: initial + force_refresh.
-    assert adapter.calls == ["anilist:999", "anilist:999"]
+    assert entry is not None
+    assert entry.normalized is not None
+    assert entry.normalized.titles.display == "Test"
+    assert entry.is_fresh
+    assert not entry.not_found

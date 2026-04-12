@@ -1,6 +1,6 @@
 """Shared Pydantic models for normalized metadata."""
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,7 +11,6 @@ from anibridge_metadata.core.enums import (
     ImageType,
     TitleStatus,
 )
-from anibridge_metadata.models.database import MetadataRecord
 
 type RuntimeBasis = Literal["derived", "provided"]
 type RelationshipKind = Literal["twin"]
@@ -224,37 +223,3 @@ class MetadataEnvelope(BaseModel):
 
     metadata: UnifiedMetadata
     cache: CacheState
-
-
-def ensure_utc(value: datetime) -> datetime:
-    """Normalize persisted datetimes to timezone-aware UTC values."""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def record_to_metadata(record: MetadataRecord) -> UnifiedMetadata:
-    """Convert a persisted metadata record into the shared response model."""
-    return UnifiedMetadata.model_validate(record.normalized_payload)
-
-
-def record_to_envelope(
-    record: MetadataRecord,
-    *,
-    source: Literal["cache", "stale-cache", "upstream"],
-    cache_ttl_seconds: int,
-) -> MetadataEnvelope:
-    """Convert a persisted metadata record into an API response envelope."""
-    now = datetime.now(UTC)
-    updated_at = ensure_utc(record.updated_at)
-    expires_at = updated_at + timedelta(seconds=cache_ttl_seconds)
-    return MetadataEnvelope(
-        metadata=record_to_metadata(record),
-        cache=CacheState(
-            updated_at=updated_at,
-            expires_at=expires_at,
-            stale=expires_at <= now,
-            source=source,
-            last_error=record.last_error,
-        ),
-    )

@@ -1,13 +1,12 @@
 """FastAPI dependency providers."""
 
-from collections.abc import AsyncIterator
-
-from fastapi import Depends, Request
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Request
 
 from anibridge_metadata.core.config import Settings
-from anibridge_metadata.services.cache import CacheService
+from anibridge_metadata.services.batch_collector import BatchCollector
+from anibridge_metadata.services.cache import CacheLayer
 from anibridge_metadata.services.providers.registry import ProviderRegistry
+from anibridge_metadata.services.resolver import Resolver
 
 
 def get_settings(request: Request) -> Settings:
@@ -20,20 +19,16 @@ def get_provider_registry(request: Request) -> ProviderRegistry:
     return request.app.state.provider_registry
 
 
-async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
-    """Yield a database session bound to the current request."""
-    async with request.app.state.session_factory() as session:
-        yield session
+def get_cache(request: Request) -> CacheLayer:
+    """Return the Redis cache layer from app state."""
+    return request.app.state.cache
 
 
-def get_cache_service(
-    request: Request,
-    session: AsyncSession = Depends(get_db_session),
-) -> CacheService:
-    """Build the cache service for the current request."""
-    return CacheService(
-        session=session,
-        settings=request.app.state.settings,
-        provider_registry=request.app.state.provider_registry,
-        revalidator=getattr(request.app.state, "revalidator", None),
-    )
+def get_resolver(request: Request) -> Resolver:
+    """Return the resolver from app state."""
+    return request.app.state.resolver
+
+
+def get_batch_collector(request: Request) -> BatchCollector:
+    """Return the batch collector from app state."""
+    return request.app.state.batch_collector

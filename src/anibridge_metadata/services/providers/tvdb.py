@@ -3,7 +3,7 @@
 from datetime import date
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from anibridge_metadata.core.descriptors import MetadataDescriptor
 from anibridge_metadata.core.enums import (
@@ -128,6 +128,11 @@ class TvdbSeasonPayload(BaseModel):
     image: str | None = None
     artworks: list[TvdbArtworkPayload] = Field(default_factory=list)
 
+    @field_validator("artworks", mode="before")
+    @classmethod
+    def _coerce_none_to_list(cls, v: object) -> object:
+        return v if v is not None else []
+
 
 class TvdbPayload(BaseModel):
     """Validated TVDB movie or series payload."""
@@ -157,6 +162,19 @@ class TvdbPayload(BaseModel):
     remote_ids: list[TvdbRemoteIdPayload] = Field(
         default_factory=list, alias="remoteIds"
     )
+
+    @field_validator(
+        "aliases",
+        "genres",
+        "artworks",
+        "seasons",
+        "episodes",
+        "remote_ids",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_none_to_list(cls, v: object) -> object:
+        return v if v is not None else []
 
 
 class TvdbAdapter(ProviderAdapter):

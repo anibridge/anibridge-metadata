@@ -1,18 +1,21 @@
 """FastAPI application factory."""
 
-import asyncio
-from contextlib import asynccontextmanager, suppress
+import logging
+from contextlib import asynccontextmanager
 from importlib.metadata import version
 
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from redis.asyncio import Redis
 
 from anibridge_metadata.core.config import Settings, get_settings
-from anibridge_metadata.core.db import build_engine, init_db
+from anibridge_metadata.services.batch_collector import BatchCollector
 from anibridge_metadata.services.batch_refresh import BatchRefreshService
+from anibridge_metadata.services.cache import CacheLayer
 from anibridge_metadata.services.providers.registry import ProviderRegistry
-from anibridge_metadata.services.revalidator import BackgroundRevalidator
+from anibridge_metadata.services.resolver import Resolver
 from anibridge_metadata.web.routes import router
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -21,54 +24,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        engine = build_engine(resolved_settings)
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        logger.info("Log level: %s", resolved_settings.log_level.upper())
+
+        redis_display = resolved_settings.redis_url.split("@")[-1]
+        logger.info("Connecting to Redis at %s", redis_display)
+        redis = Redis.from_url(
+            resolved_settings.redis_url,
+            decode_responses=False,
+        )
+        cache = CacheLayer(redis=redis, settings=resolved_settings)
         provider_registry = ProviderRegistry(settings=resolved_settings)
-
         await provider_registry.start()
-        await init_db(engine)
 
-        revalidator = BackgroundRevalidator(
-            session_factory=session_factory,
-            settings=resolved_settings,
+        enabled = sorted(provider_registry.enabled_providers())
+        batchable = sorted(provider_registry.batchable_providers())
+        logger.info("Providers enabled: %s", ", ".join(enabled) or "none")
+        logger.info("Batchable providers: %s", ", ".join(batchable) or "none")
+
+        resolver = Resolver(
+            cache=cache,
             provider_registry=provider_registry,
         )
-
-        batch_providers = provider_registry.batchable_providers()
-        batch_refresh_service = BatchRefreshService(
-            session_factory=session_factory,
-            settings=resolved_settings,
-            providers=batch_providers,
+        batch_collector = BatchCollector(resolver=resolver)
+        batch_refresh = BatchRefreshService(
+            config=resolved_settings.batch_refresh,
+            cache=cache,
+            providers=provider_registry.batchable_providers(),
         )
-        await batch_refresh_service.start()
-        startup_task = None
-        if resolved_settings.batch_refresh.refresh_on_startup:
-            startup_task = asyncio.create_task(
-                batch_refresh_service.refresh_all(),
-                name="batch-refresh-startup",
-            )
+        batch_refresh.start()
 
-        app.state.engine = engine
+        app.state.redis = redis
+        app.state.cache = cache
         app.state.provider_registry = provider_registry
-        app.state.session_factory = session_factory
         app.state.settings = resolved_settings
-        app.state.revalidator = revalidator
-        app.state.batch_refresh_service = batch_refresh_service
-        # Store the background startup task so it can be cancelled or awaited later.
-        app.state.batch_refresh_startup_task = startup_task
+        app.state.resolver = resolver
+        app.state.batch_collector = batch_collector
+        app.state.batch_refresh = batch_refresh
 
         yield
 
-        startup_task = getattr(app.state, "batch_refresh_startup_task", None)
-        if startup_task is not None and not startup_task.done():
-            startup_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await startup_task
-
-        await batch_refresh_service.close()
-        await revalidator.close()
+        logger.info("Shutting down…")
+        await batch_refresh.close()
         await provider_registry.close()
-        await engine.dispose()
+        await redis.aclose()
+        logger.info("Shutdown complete.")
 
     app = FastAPI(
         lifespan=lifespan,

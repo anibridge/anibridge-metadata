@@ -44,7 +44,7 @@ from anibridge_metadata.services.providers.base import (
     UpstreamResponseError,
 )
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class AniDbTitlePayload(BaseModel):
@@ -303,7 +303,7 @@ class AniDbAdapter(ProviderAdapter, BatchableProvider):
                 UpstreamResponseError,
                 ProviderConfigurationError,
             ):
-                LOGGER.warning("AniDB batch: skipping %s due to error", provider_id)
+                logger.warning("AniDB batch: skipping %s due to error", provider_id)
                 continue
             yield descriptor.key, normalized
 
@@ -410,7 +410,7 @@ class AniDbAdapter(ProviderAdapter, BatchableProvider):
             try:
                 await self._sync_repository()
             except Exception:
-                LOGGER.exception(
+                logger.exception(
                     "AniDB repository sync failed during scheduled refresh."
                 )
 

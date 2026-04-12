@@ -34,7 +34,7 @@ from anibridge_metadata.services.providers.base import (
 )
 from anibridge_metadata.utils.http import HttpClientError
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class AnilistFuzzyDatePayload(BaseModel):
@@ -311,7 +311,7 @@ class AnilistAdapter(ProviderAdapter, BatchableProvider):
                     json_body={"query": query, "variables": variables},
                 )
             except HttpClientError as exc:
-                LOGGER.error(
+                logger.error(
                     "AniList batch: HTTP error fetching pages %d-%d: %s",
                     page,
                     end_page - 1,
@@ -339,7 +339,7 @@ class AnilistAdapter(ProviderAdapter, BatchableProvider):
                             descriptor=descriptor, payload=payload
                         )
                     except (ValidationError, UpstreamResponseError, Exception) as exc:
-                        LOGGER.warning(
+                        logger.warning(
                             "AniList batch: skipping entry %s: %s",
                             entry.get("id"),
                             exc,

@@ -1,18 +1,25 @@
 """Readiness probe route."""
 
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
+import logging
 
-from anibridge_metadata.core.db import ping_db
-from anibridge_metadata.web.dependencies import get_db_session
+from fastapi import APIRouter, Depends
+
+from anibridge_metadata.services.cache import CacheLayer
+from anibridge_metadata.web.dependencies import get_cache
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
 @router.get("/readyz", include_in_schema=False)
 async def readyz(
-    session: AsyncSession = Depends(get_db_session),
+    cache: CacheLayer = Depends(get_cache),
 ) -> dict[str, str]:
-    """Report application and database readiness."""
-    await ping_db(session)
+    """Report application and Redis readiness."""
+    try:
+        await cache.ping()
+    except Exception:
+        logger.error("Readiness check failed: Redis unreachable", exc_info=True)
+        raise
     return {"status": "ok"}

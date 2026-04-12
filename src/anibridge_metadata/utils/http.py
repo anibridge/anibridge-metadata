@@ -7,7 +7,7 @@ from typing import Any
 import aiohttp
 from anibridge.utils.limiter import Limiter
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 _DEFAULT_RETRY_AFTER = 5
@@ -55,9 +55,12 @@ class HttpClient:
         *,
         headers: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
+        timeout: aiohttp.ClientTimeout | None = None,
     ) -> dict[str, Any]:
         """Perform a GET request and decode the JSON body."""
-        response = await self._request("GET", url, headers=headers, params=params)
+        response = await self._request(
+            "GET", url, headers=headers, params=params, timeout=timeout
+        )
         try:
             return await response.json(content_type=None)
         except aiohttp.ContentTypeError as exc:
@@ -104,6 +107,7 @@ class HttpClient:
         headers: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
+        timeout: aiohttp.ClientTimeout | None = None,
     ) -> aiohttp.ClientResponse:
         """Execute a request and return the raw response."""
         session = await self._ensure_session()
@@ -116,12 +120,13 @@ class HttpClient:
                 headers=headers,
                 json=json_body,
                 params=params,
+                timeout=timeout,
             )
             if response.status == 429:
                 retry_after = int(
                     response.headers.get("Retry-After", _DEFAULT_RETRY_AFTER)
                 )
-                LOGGER.warning(
+                logger.warning(
                     "Rate limited by %s (attempt %d/%d); sleeping %ds",
                     url,
                     attempt + 1,

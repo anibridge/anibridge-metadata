@@ -19,7 +19,7 @@ class FakeHttpClient:
         self.responses = responses or []
         self.calls: list[dict[str, object | None]] = []
 
-    async def get_json(self, url: str, headers=None, params=None):
+    async def get_json(self, url: str, headers=None, params=None, timeout=None):
         self.calls.append({"url": url, "headers": headers, "params": params})
         if not self.responses:
             raise AssertionError("No fake response configured")

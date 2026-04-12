@@ -33,7 +33,7 @@ from anibridge_metadata.services.providers.base import (
 )
 from anibridge_metadata.utils.http import HttpClientError
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class MalAlternativeTitlesPayload(BaseModel):
@@ -244,7 +244,7 @@ class MalAdapter(ProviderAdapter, BatchableProvider):
                     url, headers=headers, params=page_params
                 )
             except HttpClientError as exc:
-                LOGGER.error("MAL batch: HTTP error at offset %d: %s", offset, exc)
+                logger.error("MAL batch: HTTP error at offset %d: %s", offset, exc)
                 break
 
             data = response.get("data") or []
@@ -263,7 +263,7 @@ class MalAdapter(ProviderAdapter, BatchableProvider):
                         descriptor=descriptor, payload=payload
                     )
                 except (ValidationError, UpstreamResponseError, Exception) as exc:
-                    LOGGER.warning("MAL batch: skipping node %s: %s", node_id, exc)
+                    logger.warning("MAL batch: skipping node %s: %s", node_id, exc)
                     continue
                 yield descriptor.key, normalized
 

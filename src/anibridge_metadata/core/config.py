@@ -1,6 +1,5 @@
 """Application configuration models."""
 
-from datetime import timedelta
 from importlib.metadata import version
 
 from anibridge.utils.cache import cache
@@ -22,6 +21,11 @@ class ProviderConfig(BaseModel):
 
     enabled: bool = True
     rate_limiter: RateLimiterConfig | None = None
+    cache_ttl_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        description="Per-provider cache TTL override (seconds). Falls back to global.",
+    )
 
 
 class AniDbConfig(ProviderConfig):
@@ -95,22 +99,17 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = "sqlite+aiosqlite:///./data/anibridge_metadata.db"
-    sql_echo: bool = False
-    cache_ttl_seconds: int = Field(default=21600, ge=1)
-    stale_timeout_seconds: float = Field(
-        default=5.0,
-        gt=0,
-        description=(
-            "Maximum seconds to wait for an upstream refresh when stale cache "
-            "data is available. If the refresh doesn't finish in time, the "
-            "stale data is returned and the refresh continues in the background."
-        ),
+    log_level: str = Field(
+        default="INFO",
+        description="Root log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
     )
+    redis_url: str = "redis://localhost:6379/0"
+    cache_ttl_seconds: int = Field(default=21600, ge=1)
     request_timeout_seconds: float = Field(default=15.0, gt=0)
     user_agent: str = Field(
         default_factory=lambda: f"anibridge-metadata/{version('anibridge-metadata')}"
     )
+    batch_max_size: int = Field(default=100_000, ge=1, le=500_000)
 
     anidb: AniDbConfig = Field(default_factory=AniDbConfig)
     anilist: AnilistConfig = Field(default_factory=AnilistConfig)
@@ -120,10 +119,12 @@ class Settings(BaseSettings):
     tmdb: TmdbConfig = Field(default_factory=TmdbConfig)
     batch_refresh: BatchRefreshConfig = Field(default_factory=BatchRefreshConfig)
 
-    @property
-    def cache_ttl(self) -> timedelta:
-        """Return the global cache TTL as a timedelta."""
-        return timedelta(seconds=self.cache_ttl_seconds)
+    def ttl_for_provider(self, provider_key: str) -> int:
+        """Return the cache TTL for a specific provider, falling back to global."""
+        config: ProviderConfig | None = getattr(self, provider_key, None)
+        if config is not None and config.cache_ttl_seconds is not None:
+            return config.cache_ttl_seconds
+        return self.cache_ttl_seconds
 
 
 @cache

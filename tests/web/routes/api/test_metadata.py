@@ -13,11 +13,11 @@ from anibridge_metadata.models.metadata import (
     build_titles,
 )
 from anibridge_metadata.web.app import create_app
-from anibridge_metadata.web.dependencies import get_cache_service
+from anibridge_metadata.web.dependencies import get_resolver
 
 
-class FakeCacheService:
-    async def get_metadata(self, **kwargs) -> MetadataEnvelope:
+class FakeResolver:
+    async def resolve(self, **kwargs) -> MetadataEnvelope:
         return MetadataEnvelope(
             metadata=UnifiedMetadata(
                 kind=EntityType.SHOW,
@@ -45,7 +45,7 @@ def test_metadata_endpoint_returns_normalized_payload(
     test_settings: Settings,
 ) -> None:
     app = create_app(test_settings)
-    app.dependency_overrides[get_cache_service] = lambda: FakeCacheService()
+    app.dependency_overrides[get_resolver] = lambda: FakeResolver()
 
     with TestClient(app) as client:
         response = client.get("/api/metadata/anilist:1")
