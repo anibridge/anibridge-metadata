@@ -28,6 +28,7 @@ from anibridge_metadata.services.providers.base import (
     BatchableProvider,
     ProviderAdapter,
     ProviderPayload,
+    UpstreamNotFoundError,
     UpstreamResponseError,
 )
 from anibridge_metadata.utils.http import HttpClientError
@@ -114,6 +115,10 @@ class MalAdapter(ProviderAdapter, BatchableProvider):
                 url, headers=headers, params={"fields": MalAdapter.MAL_FIELDS}
             )
         except HttpClientError as exc:
+            if exc.status_code == 404:
+                raise UpstreamNotFoundError(
+                    "MyAnimeList did not find the requested title."
+                ) from exc
             raise UpstreamResponseError(str(exc)) from exc
         try:
             return MalAnimePayload.model_validate(payload)

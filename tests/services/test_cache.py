@@ -21,6 +21,7 @@ from anibridge_metadata.models.metadata import (
     record_to_envelope,
 )
 from anibridge_metadata.services.cache import CacheService
+from anibridge_metadata.services.providers.base import UpstreamNotFoundError
 from anibridge_metadata.services.revalidator import BackgroundRevalidator
 
 
@@ -387,3 +388,109 @@ async def test_force_refresh_bypasses_stale_while_revalidate(
     assert adapter.calls == ["anilist:1"]
 
     await revalidator.close()
+
+
+class NotFoundAdapter:
+    """Adapter that always raises UpstreamNotFoundError."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def fetch_raw(self, *, descriptor: MetadataDescriptor):
+        self.calls.append(descriptor.key)
+        raise UpstreamNotFoundError(f"Not found: {descriptor.key}")
+
+    async def normalize(self, *, descriptor: MetadataDescriptor, payload):
+        raise AssertionError("normalize should not be called for 404s")
+
+
+class NotFoundRegistry:
+    def __init__(self, adapter: NotFoundAdapter) -> None:
+        self.adapter = adapter
+
+    def get(self, provider: DescriptorProvider) -> NotFoundAdapter:
+        return self.adapter
+
+
+@pytest.mark.asyncio
+async def test_404_is_cached_and_served_from_cache(
+    cache_dependencies: tuple[Settings, async_sessionmaker],
+) -> None:
+    """A 404 should be cached; the second call should not hit the provider."""
+    settings, session_factory = cache_dependencies
+    adapter = NotFoundAdapter()
+
+    async with session_factory() as session:
+        service = CacheService(
+            session=session,
+            settings=settings,
+            provider_registry=NotFoundRegistry(adapter),
+        )
+
+        with pytest.raises(UpstreamNotFoundError):
+            await service.get_metadata(descriptor="anilist:999")
+
+        # Second call should raise from cache without contacting the provider.
+        with pytest.raises(UpstreamNotFoundError, match="Cached 404"):
+            await service.get_metadata(descriptor="anilist:999")
+
+    # Provider was only called once.
+    assert adapter.calls == ["anilist:999"]
+
+
+@pytest.mark.asyncio
+async def test_stale_404_retries_upstream(
+    cache_dependencies: tuple[Settings, async_sessionmaker],
+) -> None:
+    """When a cached 404 becomes stale, the next request retries the provider."""
+    settings, session_factory = cache_dependencies
+    adapter = NotFoundAdapter()
+
+    async with session_factory() as session:
+        service = CacheService(
+            session=session,
+            settings=settings,
+            provider_registry=NotFoundRegistry(adapter),
+        )
+
+        with pytest.raises(UpstreamNotFoundError):
+            await service.get_metadata(descriptor="anilist:999")
+
+        # Expire the record.
+        result = await session.execute(select(MetadataRecord))
+        record = result.scalar_one()
+        record.updated_at = datetime.now(UTC) - timedelta(
+            seconds=settings.cache_ttl_seconds + 1
+        )
+        await session.commit()
+
+        with pytest.raises(UpstreamNotFoundError):
+            await service.get_metadata(descriptor="anilist:999")
+
+    # Provider was called twice: once initially, once after expiry.
+    assert adapter.calls == ["anilist:999", "anilist:999"]
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_bypasses_cached_404(
+    cache_dependencies: tuple[Settings, async_sessionmaker],
+) -> None:
+    """force_refresh=True should retry the provider even when 404 is cached."""
+    settings, session_factory = cache_dependencies
+    adapter = NotFoundAdapter()
+
+    async with session_factory() as session:
+        service = CacheService(
+            session=session,
+            settings=settings,
+            provider_registry=NotFoundRegistry(adapter),
+        )
+
+        with pytest.raises(UpstreamNotFoundError):
+            await service.get_metadata(descriptor="anilist:999")
+
+        with pytest.raises(UpstreamNotFoundError):
+            await service.get_metadata(descriptor="anilist:999", force_refresh=True)
+
+    # Provider was called twice: initial + force_refresh.
+    assert adapter.calls == ["anilist:999", "anilist:999"]

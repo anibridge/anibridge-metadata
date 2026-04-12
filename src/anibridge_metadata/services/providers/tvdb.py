@@ -30,6 +30,7 @@ from anibridge_metadata.models.metadata import (
 from anibridge_metadata.services.providers.base import (
     ProviderAdapter,
     ProviderPayload,
+    UpstreamNotFoundError,
     UpstreamResponseError,
 )
 from anibridge_metadata.utils.http import HttpClientError
@@ -328,6 +329,10 @@ class TvdbAdapter(ProviderAdapter):
         try:
             response_payload = await self.http_client.get_json(url, headers=headers)
         except HttpClientError as exc:
+            if exc.status_code == 404:
+                raise UpstreamNotFoundError(
+                    "TVDB did not find the requested title."
+                ) from exc
             raise UpstreamResponseError(str(exc)) from exc
 
         payload = response_payload.get("data", response_payload)

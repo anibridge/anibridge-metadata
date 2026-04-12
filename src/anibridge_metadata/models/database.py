@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Text, UniqueConstraint
 from sqlalchemy import String as SqlString
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,7 +23,10 @@ class MetadataRecord(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     descriptor: Mapped[str] = mapped_column(SqlString(255), nullable=False, index=True)
-    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    normalized_payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    not_found: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow

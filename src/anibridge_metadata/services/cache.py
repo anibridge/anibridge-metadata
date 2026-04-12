@@ -78,6 +78,10 @@ class CacheService:
         """Return normalized metadata for a validated descriptor."""
         record = await self._load_record(descriptor=descriptor)
         if record and self._is_fresh(record) and not force_refresh:
+            if record.not_found:
+                raise UpstreamNotFoundError(
+                    f"Cached 404 for descriptor '{descriptor.key}'."
+                )
             return record_to_envelope(
                 record,
                 source="cache",
@@ -88,7 +92,14 @@ class CacheService:
         # revalidator is available, try to refresh within a short timeout.
         # If the refresh doesn't complete in time, return the stale entry
         # while the background task keeps running.
-        if record is not None and not force_refresh and self._revalidator is not None:
+        # Skip stale-while-revalidate for not_found records since there is
+        # no usable payload to fall back on.
+        if (
+            record is not None
+            and not record.not_found
+            and not force_refresh
+            and self._revalidator is not None
+        ):
             return await self._stale_while_revalidate(
                 descriptor=descriptor,
                 record=record,
@@ -192,9 +203,12 @@ class CacheService:
                 source="upstream",
                 cache_ttl_seconds=self._settings.cache_ttl_seconds,
             )
+        except UpstreamNotFoundError:
+            await self._upsert_not_found(record=record, descriptor=descriptor)
+            await self._session.commit()
+            raise
         except (
             ProviderConfigurationError,
-            UpstreamNotFoundError,
             UpstreamResponseError,
             ProviderError,
         ):
@@ -244,5 +258,26 @@ class CacheService:
 
         record.descriptor = descriptor.key
         record.normalized_payload = metadata.model_dump(mode="json")
+        record.not_found = False
         record.last_error = None
+        await self._session.flush()
+
+    async def _upsert_not_found(
+        self,
+        *,
+        record: MetadataRecord | None,
+        descriptor: MetadataDescriptor,
+    ) -> None:
+        """Mark a descriptor as not found at the upstream provider."""
+        if record is None:
+            record = MetadataRecord(
+                descriptor=descriptor.key,
+                normalized_payload=None,
+                not_found=True,
+                last_error="upstream returned 404",
+            )
+            self._session.add(record)
+        else:
+            record.not_found = True
+            record.last_error = "upstream returned 404"
         await self._session.flush()

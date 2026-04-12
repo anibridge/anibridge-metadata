@@ -161,6 +161,7 @@ class BatchRefreshService:
             session.add(record)
         else:
             record.normalized_payload = normalized.model_dump(mode="json")
+            record.not_found = False
             record.last_error = None
 
         await session.flush()

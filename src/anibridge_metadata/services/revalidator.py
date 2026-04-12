@@ -12,7 +12,10 @@ from anibridge_metadata.core.config import Settings
 from anibridge_metadata.core.descriptors import MetadataDescriptor
 from anibridge_metadata.models.database import MetadataRecord
 from anibridge_metadata.models.metadata import UnifiedMetadata
-from anibridge_metadata.services.providers.base import ProviderError
+from anibridge_metadata.services.providers.base import (
+    ProviderError,
+    UpstreamNotFoundError,
+)
 
 if TYPE_CHECKING:
     from anibridge_metadata.services.cache import ProviderLookupRegistry
@@ -86,6 +89,18 @@ class BackgroundRevalidator:
                 descriptor=descriptor,
                 payload=raw_payload,
             )
+        except UpstreamNotFoundError:
+            LOGGER.debug("Background revalidation: upstream 404 for %s", descriptor.key)
+            try:
+                async with self._session_factory() as session:
+                    await self._upsert_not_found(session, descriptor)
+                    await session.commit()
+            except Exception:
+                LOGGER.exception(
+                    "Background revalidation DB write failed for 404 on %s",
+                    descriptor.key,
+                )
+            return False
         except ProviderError:
             LOGGER.debug(
                 "Background revalidation failed for %s", descriptor.key, exc_info=True
@@ -131,5 +146,30 @@ class BackgroundRevalidator:
             session.add(record)
         else:
             record.normalized_payload = metadata.model_dump(mode="json")
+            record.not_found = False
             record.last_error = None
+        await session.flush()
+
+    @staticmethod
+    async def _upsert_not_found(
+        session: AsyncSession,
+        descriptor: MetadataDescriptor,
+    ) -> None:
+        """Mark a descriptor as not found at the upstream provider."""
+        result = await session.execute(
+            select(MetadataRecord).where(MetadataRecord.descriptor == descriptor.key)
+        )
+        record = result.scalar_one_or_none()
+
+        if record is None:
+            record = MetadataRecord(
+                descriptor=descriptor.key,
+                normalized_payload=None,
+                not_found=True,
+                last_error="upstream returned 404",
+            )
+            session.add(record)
+        else:
+            record.not_found = True
+            record.last_error = "upstream returned 404"
         await session.flush()

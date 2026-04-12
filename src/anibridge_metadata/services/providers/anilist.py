@@ -29,6 +29,7 @@ from anibridge_metadata.services.providers.base import (
     BatchableProvider,
     ProviderAdapter,
     ProviderPayload,
+    UpstreamNotFoundError,
     UpstreamResponseError,
 )
 from anibridge_metadata.utils.http import HttpClientError
@@ -168,6 +169,10 @@ class AnilistAdapter(ProviderAdapter, BatchableProvider):
         except ValueError as exc:
             raise UpstreamResponseError("AniList id must be numeric.") from exc
         except HttpClientError as exc:
+            if exc.status_code == 404:
+                raise UpstreamNotFoundError(
+                    "AniList did not find the requested title."
+                ) from exc
             raise UpstreamResponseError(str(exc)) from exc
 
         try:
@@ -176,7 +181,7 @@ class AnilistAdapter(ProviderAdapter, BatchableProvider):
             raise UpstreamResponseError("AniList response validation failed.") from exc
 
         if payload.data.media is None:
-            raise UpstreamResponseError("AniList did not return a media object.")
+            raise UpstreamNotFoundError("AniList did not return a media object.")
         return payload.data.media
 
     async def normalize(
