@@ -5,7 +5,11 @@ import logging
 from datetime import UTC, datetime
 from typing import Protocol
 
-from anibridge_metadata.core.descriptors import MetadataDescriptor, parse_descriptor
+from anibridge_metadata.core.descriptors import (
+    DescriptorValidationError,
+    MetadataDescriptor,
+    parse_descriptor,
+)
 from anibridge_metadata.core.enums import DescriptorProvider
 from anibridge_metadata.models.metadata import (
     CacheState,
@@ -71,15 +75,22 @@ class Resolver:
         - None if not in cache (caller must fetch upstream)
         """
         parsed_map: dict[str, MetadataDescriptor] = {}
-        for desc in descriptors:
-            p = parse_descriptor(desc)
-            parsed_map[desc] = p.parent or p
-
-        keys = [parsed_map[d].key for d in descriptors]
-        entries = await self._cache.get_many(keys)
-
         result: dict[str, MetadataEnvelope | CacheEntry | None] = {}
         for desc in descriptors:
+            try:
+                p = parse_descriptor(desc)
+            except DescriptorValidationError:
+                result[desc] = None
+                continue
+            parsed_map[desc] = p.parent or p
+
+        if not parsed_map:
+            return result
+
+        keys = [parsed.key for parsed in parsed_map.values()]
+        entries = await self._cache.get_many(keys)
+
+        for desc in parsed_map:
             key = parsed_map[desc].key
             entry = entries.get(key)
             if entry is not None and entry.is_fresh:

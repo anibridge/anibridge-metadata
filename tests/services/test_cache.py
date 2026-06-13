@@ -71,6 +71,15 @@ class FakeRegistry:
         return self.adapter
 
 
+class FakeBulkCache:
+    def __init__(self) -> None:
+        self.requested_keys: list[str] = []
+
+    async def get_many(self, keys: list[str]):
+        self.requested_keys = keys
+        return {key: None for key in keys}
+
+
 class FakeRedis:
     """Minimal in-memory Redis mock for cache tests."""
 
@@ -213,6 +222,20 @@ async def test_force_refresh_bypasses_cache(
     assert first.cache.source == "upstream"
     assert second.cache.source == "upstream"
     assert adapter.calls == ["anilist:1", "anilist:1"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_many_cached_isolates_invalid_descriptors() -> None:
+    bulk_cache = FakeBulkCache()
+    resolver = Resolver(
+        cache=bulk_cache,  # ty: ignore[invalid-argument-type]
+        provider_registry=FakeRegistry(FakeAdapter()),
+    )
+
+    result = await resolver.resolve_many_cached(["bad", "anilist:1"])
+
+    assert result == {"bad": None, "anilist:1": None}
+    assert bulk_cache.requested_keys == ["anilist:1"]
 
 
 @pytest.mark.asyncio
