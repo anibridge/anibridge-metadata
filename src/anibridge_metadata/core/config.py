@@ -6,6 +6,8 @@ from anibridge.utils.cache import cache
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+
 
 class RateLimiterConfig(BaseModel):
     """Configuration for provider rate limiter."""
@@ -104,7 +106,7 @@ class Settings(BaseSettings):
         description="Root log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
     )
     redis_url: str = "redis://localhost:6379/0"
-    cache_ttl_seconds: int = Field(default=21600, ge=1)
+    cache_ttl_seconds: int = Field(default=DEFAULT_CACHE_TTL_SECONDS, ge=1)
     request_timeout_seconds: float = Field(default=15.0, gt=0)
     user_agent: str = Field(
         default_factory=lambda: f"anibridge-metadata/{version('anibridge-metadata')}"
