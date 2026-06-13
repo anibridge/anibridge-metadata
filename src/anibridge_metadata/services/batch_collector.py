@@ -1,6 +1,7 @@
 """Batch collector for concurrent descriptor resolution."""
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -64,11 +65,7 @@ class BatchCollector:
         self,
         descriptors: list[str],
     ) -> AsyncIterator[BatchResult]:
-        """Yield results as each descriptor resolves.
-
-        Phase 1 — bulk cache lookup via Redis pipeline (fast path).
-        Phase 2 — upstream fetch for cache misses with bounded concurrency.
-        """
+        """Yield results as each descriptor resolves."""
         seen: set[str] = set()
         unique: list[str] = []
         for d in descriptors:
@@ -76,7 +73,6 @@ class BatchCollector:
                 seen.add(d)
                 unique.append(d)
 
-        # Phase 1: bulk cache lookup in pipeline chunks
         misses: list[str] = []
         for i in range(0, len(unique), _CACHE_PIPELINE_CHUNK):
             chunk = unique[i : i + _CACHE_PIPELINE_CHUNK]
@@ -103,20 +99,28 @@ class BatchCollector:
             len(misses),
         )
 
-        # Phase 2: upstream fetch with bounded concurrency
-        semaphore = asyncio.Semaphore(_UPSTREAM_CONCURRENCY)
+        result_queue: asyncio.Queue[BatchResult] = asyncio.Queue()
+        miss_iter = iter(misses)
 
-        async def _guarded_resolve(desc: str) -> BatchResult:
-            async with semaphore:
-                return await self._resolve_one(desc)
+        async def _worker(worker_id: int) -> None:
+            for desc in miss_iter:
+                result = await self._resolve_one(desc)
+                await result_queue.put(result)
 
-        tasks = [
-            asyncio.create_task(_guarded_resolve(desc), name=f"batch:{desc}")
-            for desc in misses
+        worker_count = min(_UPSTREAM_CONCURRENCY, len(misses))
+        workers = [
+            asyncio.create_task(_worker(i), name=f"batch-worker:{i}")
+            for i in range(worker_count)
         ]
 
-        for coro in asyncio.as_completed(tasks):
-            yield await coro
+        try:
+            for _ in range(len(misses)):
+                yield await result_queue.get()
+        finally:
+            for worker in workers:
+                worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(*workers)
 
     async def collect(
         self,
