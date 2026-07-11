@@ -14,7 +14,7 @@ maintainers = [
     { name = "Elias Benbourenane", email = "eliasbenbourenane@gmail.com" },
 ]
 
-keywords = ["anibridge", "anilist"]
+keywords = ["anibridge", "metadata"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
@@ -42,20 +42,25 @@ indent-style = "space"
 quote-style = "double"
 
 [tool.ruff.lint]
-select = ["B", "D", "DOC", "E", "F", "I", "RUF", "SIM", "UP", "W"]
-
-
-[tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = [
-    "fastapi.Body",
-    "fastapi.Cookie",
-    "fastapi.Depends",
-    "fastapi.File",
-    "fastapi.Form",
-    "fastapi.Header",
-    "fastapi.Path",
-    "fastapi.Query",
-    "fastapi.Security",
+select = [
+    "A",
+    "ASYNC",
+    "B",
+    "C4",
+    "D",
+    "E",
+    "F",
+    "FURB",
+    "G",
+    "I",
+    "N",
+    "PERF",
+    "PLC",
+    "PLE",
+    "RUF",
+    "SIM",
+    "UP",
+    "W",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -67,8 +72,11 @@ convention = "google"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "--cov=src"
+addopts = "--cov=src --import-mode=importlib"
 asyncio_mode = "auto"
+
+[tool.uv]
+python-preference = "only-managed"
 
 [tool.uv.build-backend]
 module-name = "anibridge"
