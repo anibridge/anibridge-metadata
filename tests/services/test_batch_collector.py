@@ -59,7 +59,7 @@ class SlowResolver:
     async def resolve_many_cached(
         self, descriptors: list[str]
     ) -> dict[str, MetadataEnvelope | CacheEntry | None]:
-        return {descriptor: None for descriptor in descriptors}
+        return dict.fromkeys(descriptors)
 
 
 @pytest.mark.asyncio

@@ -78,7 +78,7 @@ class CacheLayer:
 
     def _ttl_for_descriptor(self, descriptor_key: str) -> int:
         """Resolve TTL for a descriptor using provider-specific overrides."""
-        provider = descriptor_key.split(":")[0]
+        provider = descriptor_key.split(":", maxsplit=1)[0]
         config_key = _PROVIDER_KEY_MAP.get(provider, provider)
         return self._settings.ttl_for_provider(config_key)
 
@@ -109,7 +109,7 @@ class CacheLayer:
                 len(descriptor_keys),
                 exc_info=True,
             )
-            return {k: None for k in descriptor_keys}
+            return dict.fromkeys(descriptor_keys)
 
     async def _get_many(
         self, descriptor_keys: list[str]
@@ -250,7 +250,7 @@ class CacheLayer:
 
     async def ping(self) -> None:
         """Verify Redis connectivity."""
-        await self._redis.ping()  # ty:ignore[invalid-await]
+        await self._redis.ping()
 
 
 def entry_to_envelope(

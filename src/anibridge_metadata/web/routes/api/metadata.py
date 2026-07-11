@@ -1,6 +1,7 @@
 """Metadata lookup routes."""
 
 import logging
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -25,8 +26,8 @@ router = APIRouter()
 @router.get("/{descriptor:path}", response_model=MetadataEnvelope)
 async def get_metadata(
     descriptor: str,
+    resolver: Annotated[Resolver, Depends(get_resolver)],
     force_refresh: bool = Query(default=False),
-    resolver: Resolver = Depends(get_resolver),
 ) -> MetadataEnvelope:
     """Lookup metadata for a descriptor string."""
     try:

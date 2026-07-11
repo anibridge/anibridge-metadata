@@ -55,11 +55,11 @@ class HttpClient:
         *,
         headers: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
-        timeout: aiohttp.ClientTimeout | None = None,
+        request_timeout: aiohttp.ClientTimeout | None = None,
     ) -> dict[str, Any]:
         """Perform a GET request and decode the JSON body."""
         response = await self._request(
-            "GET", url, headers=headers, params=params, timeout=timeout
+            "GET", url, headers=headers, params=params, request_timeout=request_timeout
         )
         try:
             return await response.json(content_type=None)
@@ -107,7 +107,7 @@ class HttpClient:
         headers: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
-        timeout: aiohttp.ClientTimeout | None = None,
+        request_timeout: aiohttp.ClientTimeout | None = None,
     ) -> aiohttp.ClientResponse:
         """Execute a request and return the raw response."""
         session = await self._ensure_session()
@@ -120,7 +120,7 @@ class HttpClient:
                 headers=headers,
                 json=json_body,
                 params=params,
-                timeout=timeout,
+                timeout=request_timeout,
             )
             if response.status == 429:
                 retry_after = int(

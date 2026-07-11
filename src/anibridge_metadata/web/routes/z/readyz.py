@@ -1,6 +1,7 @@
 """Readiness probe route."""
 
 import logging
+from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
@@ -14,12 +15,12 @@ router = APIRouter()
 
 @router.get("/readyz", include_in_schema=False)
 async def readyz(
-    cache: CacheLayer = Depends(get_cache),
+    cache: Annotated[CacheLayer, Depends(get_cache)],
 ) -> dict[str, str]:
     """Report application and Redis readiness."""
     try:
         await cache.ping()
     except Exception:
-        logger.error("Readiness check failed: Redis unreachable", exc_info=True)
+        logger.exception("Readiness check failed: Redis unreachable")
         raise
     return {"status": "ok"}

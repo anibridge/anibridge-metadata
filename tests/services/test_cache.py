@@ -77,7 +77,7 @@ class FakeBulkCache:
 
     async def get_many(self, keys: list[str]):
         self.requested_keys = keys
-        return {key: None for key in keys}
+        return dict.fromkeys(keys)
 
 
 class FakeRedis:

@@ -127,10 +127,7 @@ class BatchCollector:
         descriptors: list[str],
     ) -> list[BatchResult]:
         """Resolve all descriptors and return results as a list."""
-        results: list[BatchResult] = []
-        async for result in self.stream(descriptors):
-            results.append(result)
-        return results
+        return [result async for result in self.stream(descriptors)]
 
     async def _resolve_one(self, descriptor: str) -> BatchResult:
         """Resolve a single descriptor, capturing any errors."""

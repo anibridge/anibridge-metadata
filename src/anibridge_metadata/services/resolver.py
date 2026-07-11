@@ -90,8 +90,8 @@ class Resolver:
         keys = [parsed.key for parsed in parsed_map.values()]
         entries = await self._cache.get_many(keys)
 
-        for desc in parsed_map:
-            key = parsed_map[desc].key
+        for desc, parsed in parsed_map.items():
+            key = parsed.key
             entry = entries.get(key)
             if entry is not None and entry.is_fresh:
                 if entry.not_found:

@@ -2,12 +2,14 @@
 
 import logging
 from collections.abc import AsyncIterator
+from typing import Annotated
 
 import orjson
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from anibridge_metadata.core.config import Settings
 from anibridge_metadata.services.batch_collector import BatchCollector, BatchResult
 from anibridge_metadata.web.dependencies import get_batch_collector, get_settings
 
@@ -55,8 +57,8 @@ def _result_to_dict(result: BatchResult) -> dict:
 @router.post("/stream")
 async def batch_stream_sse(
     body: BatchRequest,
-    collector: BatchCollector = Depends(get_batch_collector),
-    settings=Depends(get_settings),
+    collector: Annotated[BatchCollector, Depends(get_batch_collector)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> StreamingResponse:
     """Stream batch metadata results as SSE.
 
@@ -79,8 +81,8 @@ async def batch_stream_sse(
 @router.websocket("/ws")
 async def batch_websocket(
     websocket: WebSocket,
-    collector: BatchCollector = Depends(get_batch_collector),
-    settings=Depends(get_settings),
+    collector: Annotated[BatchCollector, Depends(get_batch_collector)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> None:
     """Stream batch metadata results over a WebSocket connection.
 

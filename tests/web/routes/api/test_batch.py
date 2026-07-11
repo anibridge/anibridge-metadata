@@ -53,7 +53,7 @@ class FakeResolver:
     async def resolve_many_cached(
         self, descriptors: list[str]
     ) -> dict[str, MetadataEnvelope | CacheEntry | None]:
-        return {d: None for d in descriptors}
+        return dict.fromkeys(descriptors)
 
 
 def _create_app(settings: Settings) -> TestClient:
@@ -93,10 +93,11 @@ def test_batch_sse_includes_errors(test_settings: Settings) -> None:
             json={"descriptors": ["anilist:1", "anilist:404"]},
         )
     assert response.status_code == 200
-    events = []
-    for line in response.text.strip().split("\n"):
-        if line.startswith("data:"):
-            events.append(orjson.loads(line.removeprefix("data: ")))
+    events = [
+        orjson.loads(line.removeprefix("data: "))
+        for line in response.text.strip().split("\n")
+        if line.startswith("data:")
+    ]
     statuses = {
         e.get("descriptor"): e.get("status") for e in events if "descriptor" in e
     }

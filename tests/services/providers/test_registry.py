@@ -9,8 +9,14 @@ from anibridge_metadata.core.config import (
     TmdbConfig,
     TvdbConfig,
 )
+from anibridge_metadata.core.descriptors import MetadataDescriptor
 from anibridge_metadata.core.enums import DescriptorProvider
-from anibridge_metadata.services.providers.base import ProviderConfigurationError
+from anibridge_metadata.models.metadata import UnifiedMetadata
+from anibridge_metadata.services.providers.base import (
+    ProviderAdapter,
+    ProviderConfigurationError,
+    ProviderPayload,
+)
 from anibridge_metadata.services.providers.registry import ProviderRegistry
 
 
@@ -64,7 +70,25 @@ async def test_provider_registry_runs_provider_lifecycle_hooks() -> None:
     started = False
     closed = False
 
-    class FakeProvider:
+    class FakeProvider(ProviderAdapter):
+        def __init__(self) -> None:
+            pass
+
+        async def fetch_raw(
+            self,
+            *,
+            descriptor: MetadataDescriptor,
+        ) -> ProviderPayload:
+            raise NotImplementedError
+
+        async def normalize(
+            self,
+            *,
+            descriptor: MetadataDescriptor,
+            payload: ProviderPayload,
+        ) -> UnifiedMetadata:
+            raise NotImplementedError
+
         async def start(self) -> None:
             nonlocal started
             started = True

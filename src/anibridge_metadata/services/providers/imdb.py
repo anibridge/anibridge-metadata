@@ -618,7 +618,7 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
             raw = await self.http_client.get_json(
                 self.BASE_URL,
                 params={"query": self.BATCH_TITLE_QUERY.format(uri_list=uri_list)},
-                timeout=self._SPARQL_TIMEOUT,
+                request_timeout=self._SPARQL_TIMEOUT,
             )
         except TimeoutError:
             logger.error("IMDB batch: title query timed out")
@@ -688,7 +688,7 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
             raw = await self.http_client.get_json(
                 self.BASE_URL,
                 params={"query": self.BATCH_SEASON_QUERY.format(uri_list=uri_list)},
-                timeout=self._SPARQL_TIMEOUT,
+                request_timeout=self._SPARQL_TIMEOUT,
             )
         except TimeoutError:
             logger.error("IMDB batch seasons: query timed out")
@@ -719,7 +719,7 @@ class ImdbAdapter(ProviderAdapter, BatchableProvider):
             raw = await self.http_client.get_json(
                 self.WIKIDATA_URL,
                 params={"query": self.WIKIDATA_IMDB_IDS_QUERY, "format": "json"},
-                timeout=self._SPARQL_TIMEOUT,
+                request_timeout=self._SPARQL_TIMEOUT,
             )
         except TimeoutError:
             logger.error("IMDB batch: Wikidata query timed out (120s)")
